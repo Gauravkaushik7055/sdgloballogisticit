@@ -6,10 +6,12 @@ import {
   CheckCircle2,
   Clock,
   Cloud,
+  Copy,
   Database,
   ExternalLink,
   FolderSync,
   HardDrive,
+  Link2,
   LogOut,
   Mail,
   MessageSquare,
@@ -40,6 +42,8 @@ export default function IntegrationsView() {
   const [driveEnabledDraft, setDriveEnabledDraft] = useState(true);
   const [needsGoogleAuth, setNeedsGoogleAuth] = useState(false);
   const [googleSigningIn, setGoogleSigningIn] = useState(false);
+  const [verifyingFolder, setVerifyingFolder] = useState(false);
+  const [copiedFolderLink, setCopiedFolderLink] = useState(false);
   const [savingDrive, setSavingDrive] = useState(false);
   const [syncingDriveNow, setSyncingDriveNow] = useState(false);
 
@@ -188,12 +192,60 @@ export default function IntegrationsView() {
       if (res?.status) applyDriveStatus(res.status);
       setNeedsGoogleAuth(false);
       setMsg(
-        `Signed in to Google as ${user.email || 'Authorized User'}. Confirm continuous sync below to begin writing database snapshots to Google Drive.`
+        `Signed in to Google as ${user.email || 'Authorized User'}. Confirm below to begin writing the live database and 1-second snapshots to Google Drive.`
       );
+      if (res?.status && !res.status.config.sync_confirmed) {
+        setConfirmSaveModal({
+          driveFolderUrl: res.status.config.drive_folder_url || driveUrlDraft.trim(),
+          syncIntervalMs: res.status.config.sync_interval_ms || 1000,
+          syncEnabled: true,
+        });
+      }
     } catch (e: any) {
       setErr(e?.message || 'Google Sign-In failed. Ensure popups are allowed for this window.');
     } finally {
       setGoogleSigningIn(false);
+    }
+  };
+
+  const handleVerifyDriveFolder = async () => {
+    setErr('');
+    setMsg('');
+    setVerifyingFolder(true);
+    try {
+      const token = getGoogleAccessToken();
+      const res = await apiFetch<{
+        folder: { id: string; name: string; webViewLink: string; canAddChildren: boolean };
+        status: GoogleDriveSyncStatusResponse;
+      }>('/api/integrations/google-drive/verify-folder', {
+        method: 'POST',
+        headers: token ? { 'X-Google-Access-Token': token } : undefined,
+        body: JSON.stringify({ driveFolderUrl: driveUrlDraft.trim() }),
+      });
+      if (res?.status) applyDriveStatus(res.status);
+      setMsg(
+        `Verified Google Drive folder "${res.folder.name}" (${res.folder.id}) — ${
+          res.folder.canAddChildren ? 'Read/Write access confirmed.' : 'Read-only access (grant Editor access to sync writes).'
+        }`
+      );
+    } catch (e: any) {
+      setErr(e?.message || 'Unable to verify Google Drive folder access.');
+    } finally {
+      setVerifyingFolder(false);
+    }
+  };
+
+  const handleCopyFolderUrl = async () => {
+    const urlToCopy =
+      driveStatus?.config.drive_folder_url ||
+      driveStatus?.driveFolderHref ||
+      driveUrlDraft.trim();
+    try {
+      await navigator.clipboard.writeText(urlToCopy);
+      setCopiedFolderLink(true);
+      setTimeout(() => setCopiedFolderLink(false), 2000);
+    } catch {
+      setErr('Unable to copy URL to clipboard.');
     }
   };
 
@@ -605,6 +657,85 @@ export default function IntegrationsView() {
               </div>
             </div>
 
+            {/* Direct Linked Google Drive Database Location & Access Bar */}
+            <div className="p-4 rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/50 dark:bg-blue-950/20 flex flex-wrap items-center justify-between gap-4">
+              <div className="min-w-0 flex-1 space-y-1">
+                <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+                  <Link2 className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                  <span>Linked Google Drive Database Location</span>
+                  {driveStatus?.folderAccess ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[11px] font-medium">
+                      <CheckCircle2 className="w-3 h-3" />
+                      {driveStatus.folderAccess.name} ·{' '}
+                      {driveStatus.folderAccess.canAddChildren ? 'Read/Write Verified' : 'Read-Only'}
+                    </span>
+                  ) : driveStatus?.tokenActive ? (
+                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 text-[11px] font-medium">
+                      Click Verify Access to test folder permissions
+                    </span>
+                  ) : (
+                    <span className="text-[11px] font-normal text-slate-500">
+                      Sign in with Google to verify write access & begin 1s sync
+                    </span>
+                  )}
+                </div>
+                <a
+                  href={
+                    driveStatus?.driveFolderHref ||
+                    driveStatus?.config.drive_folder_url ||
+                    'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link'
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="block text-xs font-mono text-blue-700 dark:text-blue-400 hover:underline truncate"
+                >
+                  {driveStatus?.config.drive_folder_url ||
+                    'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link'}
+                </a>
+                <div className="text-[11px] font-mono text-slate-500">
+                  Target Folder ID:{' '}
+                  <span className="font-semibold text-slate-700 dark:text-slate-300">
+                    {driveStatus?.config.drive_folder_id || '18ub4PwnI3r9io--dCEULoQPW-vPW_ihT'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <a
+                  href={
+                    driveStatus?.driveFolderHref ||
+                    driveStatus?.config.drive_folder_url ||
+                    'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link'
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-white dark:bg-slate-900 border border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  Open Drive Folder
+                </a>
+                <button
+                  type="button"
+                  onClick={handleCopyFolderUrl}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  {copiedFolderLink ? 'Copied!' : 'Copy Link'}
+                </button>
+                {driveStatus?.tokenActive && !needsGoogleAuth && (
+                  <button
+                    type="button"
+                    disabled={verifyingFolder}
+                    onClick={handleVerifyDriveFolder}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-slate-900 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 disabled:opacity-60 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5" />
+                    {verifyingFolder ? 'Verifying...' : 'Verify Access'}
+                  </button>
+                )}
+              </div>
+            </div>
+
             {driveStatus?.config.last_error && (
               <div className="p-3 rounded-lg border border-amber-300 dark:border-amber-800 bg-amber-50 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-300">
                 <strong>Sync Notice:</strong> {driveStatus.config.last_error}
@@ -719,34 +850,62 @@ export default function IntegrationsView() {
                         </td>
                       </tr>
                     ) : (
-                      driveStatus.files.map((f) => (
-                        <tr key={f.id}>
-                          <td className="py-2.5 px-4">
-                            <div className="font-mono font-semibold text-slate-900 dark:text-white">{f.file_name}</div>
-                            <div className="text-[10px] font-mono text-slate-400">
-                              ID: {f.drive_file_id.slice(0, 14)}… · SHA256: {f.content_sha256?.slice(0, 10)}
-                            </div>
-                          </td>
-                          <td className="py-2.5 px-4 text-right font-mono tabular-nums">{f.record_count}</td>
-                          <td className="py-2.5 px-4 text-right font-mono tabular-nums">
-                            {formatBytesCompact(f.byte_size)}
-                          </td>
-                          <td className="py-2.5 px-4 font-mono text-slate-500 whitespace-nowrap">
-                            {formatDateTime(f.last_synced_at)}
-                          </td>
-                          <td className="py-2.5 px-4 text-right">
-                            <button
-                              type="button"
-                              onClick={() => setConfirmDeleteFileModal(f)}
-                              className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 cursor-pointer"
-                              title="Delete file from Google Drive"
-                            >
-                              <Trash2 className="w-3 h-3" />
-                              Delete
-                            </button>
-                          </td>
-                        </tr>
-                      ))
+                      driveStatus.files.map((f) => {
+                        const isPrimaryDb = f.entity_key === 'sqlite_database';
+                        const fileHref = `https://drive.google.com/file/d/${encodeURIComponent(f.drive_file_id)}/view`;
+                        return (
+                          <tr
+                            key={f.id}
+                            className={isPrimaryDb ? 'bg-blue-50/40 dark:bg-blue-950/20' : undefined}
+                          >
+                            <td className="py-2.5 px-4">
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-semibold text-slate-900 dark:text-white">
+                                  {f.file_name}
+                                </span>
+                                {isPrimaryDb && (
+                                  <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-blue-100 dark:bg-blue-950/70 text-blue-700 dark:text-blue-300">
+                                    Live SQLite DB
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[10px] font-mono text-slate-400">
+                                ID: {f.drive_file_id.slice(0, 14)}… · SHA256: {f.content_sha256?.slice(0, 10)}
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-4 text-right font-mono tabular-nums">{f.record_count}</td>
+                            <td className="py-2.5 px-4 text-right font-mono tabular-nums">
+                              {formatBytesCompact(f.byte_size)}
+                            </td>
+                            <td className="py-2.5 px-4 font-mono text-slate-500 whitespace-nowrap">
+                              {formatDateTime(f.last_synced_at)}
+                            </td>
+                            <td className="py-2.5 px-4 text-right">
+                              <div className="inline-flex items-center justify-end gap-1.5">
+                                <a
+                                  href={fileHref}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-blue-200 dark:border-blue-900/60 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/30"
+                                  title="Open file directly in Google Drive"
+                                >
+                                  <ExternalLink className="w-3 h-3" />
+                                  Open
+                                </a>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteFileModal(f)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 text-[11px] rounded border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/30 cursor-pointer"
+                                  title="Delete file from Google Drive"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  Delete
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

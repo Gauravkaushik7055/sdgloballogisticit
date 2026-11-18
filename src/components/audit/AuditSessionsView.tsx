@@ -6,6 +6,7 @@ import {
   Clock,
   Database,
   Download,
+  ExternalLink,
   HardDrive,
   Lock,
   Plus,
@@ -18,7 +19,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext.tsx';
-import { AdminPermissionPolicy, RetentionPolicyItem } from '../../types/index.ts';
+import { AdminPermissionPolicy, GoogleDriveSyncStatusResponse, RetentionPolicyItem } from '../../types/index.ts';
 import { apiFetch, fetchProtectedBlobUrl, formatDateTime } from '../../utils/api.ts';
 import { formatBytesCompact } from '../common/MediaPreviewModal.tsx';
 
@@ -61,7 +62,7 @@ const DEFAULT_POLICY: AdminPermissionPolicy = {
 
 type SecurityTab = 'dashboard' | 'backups' | 'activity' | 'permissions' | 'retention';
 
-export default function AuditSessionsView() {
+export default function AuditSessionsView({ onOpenIntegrations }: { onOpenIntegrations?: () => void }) {
   const { user, subscribeRealtime } = useAuth();
   const [activeTab, setActiveTab] = useState<SecurityTab>('dashboard');
 
@@ -77,6 +78,7 @@ export default function AuditSessionsView() {
 
   // Tab 2: Backups & Restore
   const [backups, setBackups] = useState<any[]>([]);
+  const [driveSyncStatus, setDriveSyncStatus] = useState<GoogleDriveSyncStatusResponse | null>(null);
   const [runningBackup, setRunningBackup] = useState(false);
   const [verifyingBackupId, setVerifyingBackupId] = useState<number | null>(null);
   const [downloadingBackupId, setDownloadingBackupId] = useState<number | null>(null);
@@ -152,8 +154,12 @@ export default function AuditSessionsView() {
 
   const loadBackups = useCallback(async () => {
     try {
-      const res = await apiFetch<{ backups: any[] }>('/api/auth/backups');
+      const [res, dRes] = await Promise.all([
+        apiFetch<{ backups: any[] }>('/api/auth/backups'),
+        apiFetch<GoogleDriveSyncStatusResponse>('/api/integrations/google-drive/status').catch(() => null),
+      ]);
       setBackups(res.backups || []);
+      if (dRes) setDriveSyncStatus(dRes);
     } catch (err: any) {
       setSecErr(err.message || 'Unable to load backups');
     }
@@ -243,6 +249,8 @@ export default function AuditSessionsView() {
         if (activeTab === 'dashboard') loadSecurityDashboard();
         if (activeTab === 'backups') loadBackups();
         if (activeTab === 'activity') loadActivityMonitor();
+      } else if (evt.event === 'drive_sync:updated' && evt.data) {
+        setDriveSyncStatus(evt.data as GoogleDriveSyncStatusResponse);
       }
     });
   }, [activeTab, subscribeRealtime, loadSecurityDashboard, loadBackups, loadActivityMonitor]);
@@ -1021,6 +1029,66 @@ export default function AuditSessionsView() {
                 <RefreshCw className="w-3.5 h-3.5" />
                 Refresh
               </button>
+            </div>
+          </div>
+
+          {/* Linked Google Drive 1-Second Database Location */}
+          <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/60 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+                <HardDrive className="w-4 h-4 text-blue-600 shrink-0" />
+                <span>Google Drive Live Database Sync ({driveSyncStatus?.config.sync_interval_ms ?? 1000}ms Interval)</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                    driveSyncStatus?.tokenActive && driveSyncStatus.config.sync_enabled && driveSyncStatus.config.sync_confirmed
+                      ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                      : 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300'
+                  }`}
+                >
+                  {driveSyncStatus?.tokenActive && driveSyncStatus.config.sync_enabled && driveSyncStatus.config.sync_confirmed
+                    ? 'Active · Syncing Every Second'
+                    : driveSyncStatus?.tokenActive
+                    ? 'Awaiting Confirmation'
+                    : 'Awaiting Google Sign-In'}
+                </span>
+              </div>
+              <a
+                href={
+                  driveSyncStatus?.driveFolderHref ||
+                  driveSyncStatus?.config.drive_folder_url ||
+                  'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link'
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                className="block text-xs font-mono text-blue-700 dark:text-blue-400 hover:underline truncate"
+              >
+                {driveSyncStatus?.config.drive_folder_url ||
+                  'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link'}
+              </a>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <a
+                href={
+                  driveSyncStatus?.driveFolderHref ||
+                  driveSyncStatus?.config.drive_folder_url ||
+                  'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link'
+                }
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-white dark:bg-slate-900 border border-blue-300 dark:border-blue-800 text-blue-700 dark:text-blue-300 hover:bg-blue-50 dark:hover:bg-blue-950/40"
+              >
+                <ExternalLink className="w-3.5 h-3.5" />
+                Open Drive Folder
+              </a>
+              {onOpenIntegrations && (
+                <button
+                  type="button"
+                  onClick={onOpenIntegrations}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white cursor-pointer"
+                >
+                  Open Drive Sync Panel
+                </button>
+              )}
             </div>
           </div>
 

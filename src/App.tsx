@@ -229,7 +229,9 @@ function WorkspaceApp() {
       case 'integrations':
         return user.role === 'super_admin' ? <IntegrationsView /> : null;
       case 'audit':
-        return user.role === 'super_admin' ? <AuditSessionsView /> : null;
+        return user.role === 'super_admin' ? (
+          <AuditSessionsView onOpenIntegrations={() => setActiveSection('integrations')} />
+        ) : null;
       default:
         return null;
     }

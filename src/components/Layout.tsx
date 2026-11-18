@@ -226,7 +226,7 @@ export default function Layout({
     },
     {
       id: 'integrations',
-      label: 'Notifications, Outlook & SLA',
+      label: 'Google Drive DB & Integrations',
       icon: Settings,
       roles: ['super_admin'],
     },

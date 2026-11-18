@@ -7,6 +7,7 @@ import {
   registerGoogleDriveSession,
   runGoogleDriveSyncCycle,
   updateGoogleDriveConfig,
+  verifyTargetDriveFolder,
 } from '../googleDriveSync.ts';
 
 const router = Router();
@@ -89,9 +90,29 @@ router.post('/integrations/google-drive/sync-now', requireAuth, requireRole('sup
   }
 });
 
+router.post('/integrations/google-drive/verify-folder', requireAuth, requireRole('super_admin'), async (req: AuthRequest, res) => {
+  try {
+    const incomingToken = extractGoogleToken(req);
+    if (incomingToken) {
+      await registerGoogleDriveSession({
+        accessToken: incomingToken,
+        actorUser: req.user!,
+        confirmSync: false,
+      });
+    }
+    const folder = await verifyTargetDriveFolder({
+      driveFolderUrl: req.body?.driveFolderUrl,
+      actorUser: req.user!,
+    });
+    res.json({ ok: true, folder, status: getGoogleDriveStatus() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Unable to verify Google Drive folder access.' });
+  }
+});
+
 router.delete('/integrations/google-drive/files/:fileId', requireAuth, requireRole('super_admin'), async (req: AuthRequest, res) => {
   try {
-    const result = await deleteSyncedDriveFile(req.params.fileId, req.user!);
+    const result = await deleteSyncedDriveFile(String(req.params.fileId), req.user!);
     res.json({ ...result, status: getGoogleDriveStatus() });
   } catch (err: any) {
     res.status(400).json({ error: err?.message || 'Failed to delete file from Google Drive.' });

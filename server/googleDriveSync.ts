@@ -17,12 +17,21 @@ interface InMemoryDriveSession {
   setAt: string;
 }
 
+interface VerifiedFolderAccess {
+  id: string;
+  name: string;
+  webViewLink: string;
+  canAddChildren: boolean;
+  verifiedAt: string;
+}
+
 // Keep Google OAuth access token strictly in server process memory (never stored on disk or browser storage)
 let activeDriveSession: InMemoryDriveSession | null = null;
+let verifiedFolderAccess: VerifiedFolderAccess | null = null;
 let syncLoopTimer: ReturnType<typeof setInterval> | null = null;
 let syncInFlight = false;
 let lastDbSnapshotSeq = -1;
-let lastDbSnapshotAt = 0;
+let lastCycleFinishedAt = 0;
 
 export function parseDriveFolderId(urlOrId: string): string | null {
   const raw = (urlOrId || '').trim();
@@ -87,9 +96,9 @@ export async function validateGoogleAccessToken(accessToken: string): Promise<{ 
   };
 }
 
-export async function verifyFolderAccess(accessToken: string, folderId: string): Promise<{ id: string; name: string }> {
+export async function verifyFolderAccess(accessToken: string, folderId: string): Promise<VerifiedFolderAccess> {
   const res = await fetch(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=id,name,mimeType,trashed&supportsAllDrives=true`,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=id,name,mimeType,trashed,webViewLink,capabilities(canAddChildren,canEdit)&supportsAllDrives=true`,
     {
       headers: { Authorization: `Bearer ${accessToken}` },
     }
@@ -97,25 +106,68 @@ export async function verifyFolderAccess(accessToken: string, folderId: string):
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     if (res.status === 401) {
-      throw new Error('Google OAuth token expired (401). Please sign in with Google again.');
+      throw Object.assign(
+        new Error('Google OAuth token expired (401). Please sign in with Google again.'),
+        { statusCode: 401 }
+      );
     }
     throw new Error(`Unable to access target Google Drive folder (${res.status}): ${txt.slice(0, 200)}`);
   }
-  const info = (await res.json()) as { id: string; name: string; mimeType: string; trashed?: boolean };
+  const info = (await res.json()) as {
+    id: string;
+    name: string;
+    mimeType: string;
+    trashed?: boolean;
+    webViewLink?: string;
+    capabilities?: { canAddChildren?: boolean; canEdit?: boolean };
+  };
   if (info.trashed) {
     throw new Error('Target Google Drive folder is in Trash.');
   }
   if (info.mimeType !== 'application/vnd.google-apps.folder') {
     throw new Error('Target Google Drive link does not point to a folder.');
   }
-  return { id: info.id, name: info.name };
+  const verified: VerifiedFolderAccess = {
+    id: info.id,
+    name: info.name,
+    webViewLink: info.webViewLink || `https://drive.google.com/drive/folders/${encodeURIComponent(info.id)}`,
+    canAddChildren: info.capabilities?.canAddChildren !== false,
+    verifiedAt: new Date().toISOString(),
+  };
+  return verified;
+}
+
+export async function verifyTargetDriveFolder(params: {
+  driveFolderUrl?: string;
+  actorUser: AuthUser;
+}) {
+  if (!activeDriveSession?.accessToken) {
+    throw new Error('Sign in with Google first to verify Google Drive folder access.');
+  }
+  const cfg = getDriveConfigRow();
+  const folderId = params.driveFolderUrl ? parseDriveFolderId(params.driveFolderUrl) : cfg.drive_folder_id;
+  if (!folderId) {
+    throw new Error('Please enter a valid Google Drive folder link or folder ID.');
+  }
+  const verified = await verifyFolderAccess(activeDriveSession.accessToken, folderId);
+  if (folderId === cfg.drive_folder_id) {
+    verifiedFolderAccess = verified;
+  }
+  db.prepare(
+    `UPDATE google_drive_sync_config
+     SET last_error = NULL,
+         updated_at = datetime('now')
+     WHERE id = 1`
+  ).run();
+  emitStatusUpdate();
+  return verified;
 }
 
 export async function registerGoogleDriveSession(params: {
   accessToken: string;
   actorUser: AuthUser;
   confirmSync?: boolean;
-}): Promise<{ email?: string; displayName?: string }> {
+}): Promise<{ email?: string; displayName?: string; folderAccess?: VerifiedFolderAccess | null }> {
   const profile = await validateGoogleAccessToken(params.accessToken);
   activeDriveSession = {
     accessToken: params.accessToken,
@@ -124,17 +176,26 @@ export async function registerGoogleDriveSession(params: {
     setAt: new Date().toISOString(),
   };
 
+  const cfg = getDriveConfigRow();
+  let folderCheckError: string | null = null;
+  try {
+    verifiedFolderAccess = await verifyFolderAccess(params.accessToken, cfg.drive_folder_id);
+  } catch (err: any) {
+    verifiedFolderAccess = null;
+    folderCheckError = err?.message || 'Unable to access target Google Drive folder.';
+  }
+
   if (params.confirmSync) {
     db.prepare(
       `UPDATE google_drive_sync_config
        SET connected_google_email = ?,
            sync_confirmed = 1,
            last_status = CASE WHEN sync_enabled = 1 THEN 'connected' ELSE 'paused' END,
-           last_error = NULL,
+           last_error = ?,
            updated_by = ?,
            updated_at = datetime('now')
        WHERE id = 1`
-    ).run(activeDriveSession.email || null, params.actorUser.id);
+    ).run(activeDriveSession.email || null, folderCheckError, params.actorUser.id);
   } else {
     db.prepare(
       `UPDATE google_drive_sync_config
@@ -144,11 +205,11 @@ export async function registerGoogleDriveSession(params: {
              WHEN sync_confirmed = 0 THEN 'awaiting_confirmation'
              ELSE 'paused'
            END,
-           last_error = NULL,
+           last_error = ?,
            updated_by = ?,
            updated_at = datetime('now')
        WHERE id = 1`
-    ).run(activeDriveSession.email || null, params.actorUser.id);
+    ).run(activeDriveSession.email || null, folderCheckError, params.actorUser.id);
   }
 
   writeAuditLog({
@@ -158,15 +219,20 @@ export async function registerGoogleDriveSession(params: {
     action: 'GOOGLE_DRIVE_AUTHORIZED',
     entityType: 'integration',
     entityId: 'google_drive',
-    details: { google_email: activeDriveSession.email || null, sync_confirmed: Boolean(params.confirmSync) },
+    details: {
+      google_email: activeDriveSession.email || null,
+      sync_confirmed: Boolean(params.confirmSync),
+      folder_verified: Boolean(verifiedFolderAccess),
+    },
   });
 
   emitStatusUpdate();
-  return profile;
+  return { ...profile, folderAccess: verifiedFolderAccess };
 }
 
 export function clearGoogleDriveSession(actorUser?: AuthUser | null) {
   activeDriveSession = null;
+  verifiedFolderAccess = null;
   db.prepare(
     `UPDATE google_drive_sync_config
      SET last_status = 'awaiting_auth',
@@ -213,11 +279,16 @@ export async function updateGoogleDriveConfig(params: {
       ? Math.max(1000, Math.min(60_000, Math.round(Number(params.syncIntervalMs) || 1000)))
       : Math.max(1000, current.sync_interval_ms || 1000);
 
-  if (activeDriveSession?.accessToken && nextFolderId !== current.drive_folder_id) {
-    await verifyFolderAccess(activeDriveSession.accessToken, nextFolderId);
+  if (activeDriveSession?.accessToken) {
+    verifiedFolderAccess = await verifyFolderAccess(activeDriveSession.accessToken, nextFolderId);
+  } else if (nextFolderId !== current.drive_folder_id) {
+    verifiedFolderAccess = null;
   }
 
   const folderChanged = nextFolderId !== current.drive_folder_id;
+  if (folderChanged) {
+    lastDbSnapshotSeq = -1;
+  }
   const nextStatus = !activeDriveSession?.accessToken
     ? 'awaiting_auth'
     : !nextConfirmed
@@ -285,12 +356,19 @@ export function getGoogleDriveStatus() {
     .prepare('SELECT * FROM drive_sync_changelog ORDER BY seq DESC LIMIT 25')
     .all();
 
+  const driveFolderHref =
+    verifiedFolderAccess?.id === cfg.drive_folder_id
+      ? verifiedFolderAccess.webViewLink
+      : `https://drive.google.com/drive/folders/${encodeURIComponent(cfg.drive_folder_id)}`;
+
   return {
     config: {
       ...cfg,
       sync_enabled: Boolean(cfg.sync_enabled),
       sync_confirmed: Boolean(cfg.sync_confirmed),
     },
+    driveFolderHref,
+    folderAccess: verifiedFolderAccess?.id === cfg.drive_folder_id ? verifiedFolderAccess : null,
     tokenActive: Boolean(activeDriveSession?.accessToken),
     connectedAccount: activeDriveSession
       ? {
@@ -619,8 +697,19 @@ export async function runGoogleDriveSyncCycle(options?: {
     return { synced: false, filesUpdated: 0, skippedReason: !cfg.sync_confirmed ? 'awaiting_confirmation' : 'paused' };
   }
 
+  if (!options?.force) {
+    const intervalMs = Math.max(1000, cfg.sync_interval_ms || 1000);
+    if (Date.now() - lastCycleFinishedAt < intervalMs - 100) {
+      return { synced: false, filesUpdated: 0, skippedReason: 'interval_wait' };
+    }
+  }
+
   const latestSeq = (db.prepare('SELECT COALESCE(MAX(seq), 0) as m FROM drive_sync_changelog').get() as { m: number }).m;
-  if (!options?.force && latestSeq <= (cfg.last_synced_seq || 0)) {
+  const sqliteMapped = db
+    .prepare("SELECT drive_file_id FROM google_drive_file_map WHERE folder_id = ? AND entity_key = 'sqlite_database'")
+    .get(cfg.drive_folder_id) as { drive_file_id: string } | undefined;
+
+  if (!options?.force && latestSeq <= (cfg.last_synced_seq || 0) && sqliteMapped) {
     return { synced: false, filesUpdated: 0, skippedReason: 'up_to_date' };
   }
 
@@ -630,6 +719,10 @@ export async function runGoogleDriveSyncCycle(options?: {
   try {
     const accessToken = activeDriveSession.accessToken;
     const folderId = cfg.drive_folder_id;
+
+    if (!verifiedFolderAccess || verifiedFolderAccess.id !== folderId) {
+      verifiedFolderAccess = await verifyFolderAccess(accessToken, folderId);
+    }
 
     // Discover existing files once per folder (or when forcing) to prevent duplicates
     const mappedRows = db
@@ -650,10 +743,9 @@ export async function runGoogleDriveSyncCycle(options?: {
 
     const { datasets, totalRecords } = buildDomainDatasets(nowIso, latestSeq);
 
-    // Include a live SQLite binary snapshot when forcing or at most once every 15 seconds if DB changed
+    // Sync the live SQLite binary database snapshot on every 1-second change cycle or force
     const shouldSyncSqliteSnapshot =
-      Boolean(options?.force) ||
-      (latestSeq > lastDbSnapshotSeq && Date.now() - lastDbSnapshotAt >= 15_000);
+      Boolean(options?.force) || !sqliteMapped || latestSeq > lastDbSnapshotSeq;
 
     if (shouldSyncSqliteSnapshot) {
       const tmpSnapPath = path.join(os.tmpdir(), `sdglobal-drive-snap-${process.pid}-${Date.now()}.db`);
@@ -673,7 +765,6 @@ export async function runGoogleDriveSyncCycle(options?: {
           content: snapBuf,
         });
         lastDbSnapshotSeq = latestSeq;
-        lastDbSnapshotAt = Date.now();
       } finally {
         try {
           if (fs.existsSync(tmpSnapPath)) fs.unlinkSync(tmpSnapPath);
@@ -768,6 +859,7 @@ export async function runGoogleDriveSyncCycle(options?: {
     const isAuthErr = err?.statusCode === 401 || String(err?.message || '').includes('401');
     if (isAuthErr) {
       activeDriveSession = null;
+      verifiedFolderAccess = null;
     }
     db.prepare(
       `UPDATE google_drive_sync_config
@@ -783,6 +875,7 @@ export async function runGoogleDriveSyncCycle(options?: {
     }
     return { synced: false, filesUpdated: 0, skippedReason: isAuthErr ? 'awaiting_auth' : 'error' };
   } finally {
+    lastCycleFinishedAt = Date.now();
     syncInFlight = false;
   }
 }

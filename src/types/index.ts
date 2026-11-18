@@ -149,6 +149,14 @@ export interface GoogleDriveSyncedFile {
 
 export interface GoogleDriveSyncStatusResponse {
   config: GoogleDriveSyncConfig;
+  driveFolderHref?: string;
+  folderAccess?: {
+    id: string;
+    name: string;
+    webViewLink: string;
+    canAddChildren: boolean;
+    verifiedAt: string;
+  } | null;
   tokenActive: boolean;
   connectedAccount: { email?: string; displayName?: string; setAt?: string } | null;
   pendingChanges: number;
