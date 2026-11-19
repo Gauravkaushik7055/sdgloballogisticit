@@ -115,11 +115,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const prefsRef = useRef<NotificationPrefs>(DEFAULT_PREFS);
   prefsRef.current = notificationPrefs;
   const shownPopupIdsRef = useRef<Set<number>>(new Set());
+  const sessionActiveRef = useRef(Boolean(getAuthToken()));
 
   const clearSessionNotice = useCallback(() => setSessionNotice(null), []);
 
   const clearLocalSessionState = useCallback((notice?: string | null) => {
     shownPopupIdsRef.current.clear();
+    sessionActiveRef.current = false;
     setAuthToken(null);
     setUser(null);
     setNotifications([]);
@@ -172,7 +174,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const refreshNotifications = useCallback(async () => {
-    if (!getAuthToken()) return;
+    if (!getAuthToken() && !sessionActiveRef.current) return;
     try {
       const data = await apiFetch<{ notifications: NotificationItem[]; unreadCount: number }>('/api/notifications');
       setNotifications(data.notifications);
@@ -183,7 +185,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const refreshBroadcasts = useCallback(async () => {
-    if (!getAuthToken()) return;
+    if (!getAuthToken() && !sessionActiveRef.current) return;
     try {
       const data = await apiFetch<{
         broadcasts: UserBroadcastItem[];
@@ -201,7 +203,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [triggerBroadcastPopups]);
 
   const refreshChatUnread = useCallback(async () => {
-    if (!getAuthToken()) return;
+    if (!getAuthToken() && !sessionActiveRef.current) return;
     try {
       const data = await apiFetch<{ totalUnread: number }>('/api/chat/unread-summary');
       setChatUnreadCount(data.totalUnread ?? 0);
@@ -212,6 +214,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const syncUserSessionData = useCallback(
     async (sessionUser: UserSession) => {
+      sessionActiveRef.current = true;
       if (sessionUser.notification_prefs) {
         setNotificationPrefs(sessionUser.notification_prefs);
       } else if (sessionUser.role === 'super_admin') {
@@ -230,18 +233,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   );
 
   const refreshUser = useCallback(async () => {
-    if (!getAuthToken()) {
-      setUser(null);
-      setLoading(false);
-      return;
-    }
     try {
       const data = await apiFetch<{ user: UserSession }>('/api/auth/me');
+      sessionActiveRef.current = true;
       setUser(data.user);
       await syncUserSessionData(data.user);
-    } catch {
-      setAuthToken(null);
-      setUser(null);
+    } catch (err: any) {
+      const status = err?.status;
+      if (status === 401 || status === 403 || !getAuthToken()) {
+        sessionActiveRef.current = false;
+        setAuthToken(null);
+        setUser(null);
+      }
     } finally {
       setLoading(false);
     }
@@ -260,6 +263,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('sdglobal:session-ended', onSessionEnded);
   }, [clearLocalSessionState]);
 
+  useEffect(() => {
+    const onOnline = () => {
+      if (sessionActiveRef.current || getAuthToken()) {
+        refreshUser();
+      }
+    };
+    window.addEventListener('online', onOnline);
+    return () => window.removeEventListener('online', onOnline);
+  }, [refreshUser]);
+
   // WebSocket live connection for Direct Chat, Presence, Notifications, Broadcasts, and Real-time Dashboard sync
   useEffect(() => {
     if (!user) {
@@ -268,7 +281,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const token = getAuthToken();
-    if (!token) return;
 
     let ws: WebSocket | null = null;
     let closedByCleanup = false;
@@ -278,7 +290,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     const connect = () => {
       if (closedByCleanup) return;
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url = `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`;
+      const url = token
+        ? `${protocol}//${window.location.host}/ws?token=${encodeURIComponent(token)}`
+        : `${protocol}//${window.location.host}/ws`;
       ws = new WebSocket(url);
 
       ws.onopen = () => {
@@ -296,8 +310,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
       ws.onmessage = (msgEvent) => {
         try {
-          const parsed = JSON.parse(msgEvent.data) as RealtimeEvent;
-          if (!parsed?.event) return;
+          const rawParsed = JSON.parse(msgEvent.data) as { event?: string; data?: any; payload?: any };
+          if (!rawParsed?.event) return;
+          const parsed: RealtimeEvent = {
+            event: rawParsed.event,
+            data: rawParsed.data !== undefined ? rawParsed.data : rawParsed.payload,
+          };
 
           if (parsed.event === 'presence:update' && Array.isArray(parsed.data?.onlineUserIds)) {
             setOnlineUserIds(parsed.data.onlineUserIds);

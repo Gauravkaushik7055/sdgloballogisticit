@@ -2,9 +2,15 @@ import crypto from 'crypto';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { db } from './db.ts';
+import {
+  db,
+  restoreDatabaseFromFile,
+  syncDepartmentDropdownOptions,
+  syncLocationTypeDropdownOptions,
+} from './db.ts';
 import { writeAuditLog, type AuthUser } from './auth.ts';
-import { sendToSuperAdmins } from './realtime.ts';
+import { broadcastAll, sendToSuperAdmins } from './realtime.ts';
+import { checkAndNotifyCloudDbMutation } from './cloudDbService.ts';
 
 export const DEFAULT_DRIVE_FOLDER_URL =
   'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link';
@@ -25,13 +31,53 @@ interface VerifiedFolderAccess {
   verifiedAt: string;
 }
 
+export interface RemoteRecoveryInfo {
+  fileId: string;
+  fileName: string;
+  kind: 'sqlite' | 'json';
+  sizeBytes: number;
+  modifiedTime: string | null;
+  webViewLink?: string;
+}
+
 // Keep Google OAuth access token strictly in server process memory (never stored on disk or browser storage)
 let activeDriveSession: InMemoryDriveSession | null = null;
 let verifiedFolderAccess: VerifiedFolderAccess | null = null;
+let remoteRecoveryAvailable: RemoteRecoveryInfo | null = null;
 let syncLoopTimer: ReturnType<typeof setInterval> | null = null;
 let syncInFlight = false;
 let lastDbSnapshotSeq = -1;
-let lastCycleFinishedAt = 0;
+let lastCycleStartedAt = 0;
+let consecutiveErrors = 0;
+let nextRetryAt = 0;
+let lastSuccessfulSyncAt: string | null = null;
+
+const TRANSIENT_HTTP_STATUS = new Set([429, 500, 502, 503, 504]);
+
+async function fetchWithRetry(url: string, init: RequestInit = {}, maxRetries = 2): Promise<Response> {
+  let attempt = 0;
+  let lastErr: unknown;
+  while (attempt <= maxRetries) {
+    try {
+      const res = await fetch(url, init);
+      if (res.ok || !TRANSIENT_HTTP_STATUS.has(res.status) || attempt === maxRetries) {
+        return res;
+      }
+      const retryAfterSec = Number(res.headers.get('retry-after') || 0);
+      const delayMs = retryAfterSec > 0
+        ? Math.min(3000, retryAfterSec * 1000)
+        : Math.min(2000, 300 * Math.pow(2, attempt) + Math.floor(Math.random() * 120));
+      await new Promise((r) => setTimeout(r, delayMs));
+    } catch (err) {
+      lastErr = err;
+      if (attempt === maxRetries) throw err;
+      const delayMs = Math.min(2000, 300 * Math.pow(2, attempt) + Math.floor(Math.random() * 120));
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+    attempt += 1;
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Network request failed');
+}
 
 export function parseDriveFolderId(urlOrId: string): string | null {
   const raw = (urlOrId || '').trim();
@@ -97,7 +143,7 @@ export async function validateGoogleAccessToken(accessToken: string): Promise<{ 
 }
 
 export async function verifyFolderAccess(accessToken: string, folderId: string): Promise<VerifiedFolderAccess> {
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(folderId)}?fields=id,name,mimeType,trashed,webViewLink,capabilities(canAddChildren,canEdit)&supportsAllDrives=true`,
     {
       headers: { Authorization: `Bearer ${accessToken}` },
@@ -137,6 +183,74 @@ export async function verifyFolderAccess(accessToken: string, folderId: string):
   return verified;
 }
 
+function safeTableCount(tableName: string): number {
+  try {
+    const row = db.prepare(`SELECT COUNT(*) as c FROM ${tableName}`).get() as { c: number } | undefined;
+    return Number(row?.c || 0);
+  } catch {
+    return 0;
+  }
+}
+
+export function isLocalDatabaseFresh(): boolean {
+  return (
+    safeTableCount('tickets') === 0 &&
+    safeTableCount('employees') === 0 &&
+    safeTableCount('moderators') === 0 &&
+    safeTableCount('direct_messages') === 0 &&
+    safeTableCount('expenses') === 0 &&
+    safeTableCount('saved_reports') === 0
+  );
+}
+
+export async function inspectRemoteDriveBackup(
+  accessToken: string,
+  folderId: string
+): Promise<RemoteRecoveryInfo | null> {
+  const q =
+    `'${folderId.replace(/'/g, "\\'")}' in parents and trashed = false ` +
+    `and (name = 'sdglobal-crm-live.db' or name = 'sdglobal-crm-full-snapshot.json')`;
+  const url =
+    `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}` +
+    '&fields=files(id,name,size,modifiedTime,webViewLink)&pageSize=20&supportsAllDrives=true&includeItemsFromAllDrives=true';
+  const res = await fetchWithRetry(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw Object.assign(new Error('Google Drive OAuth token expired (401). Please sign in again.'), { statusCode: 401 });
+    }
+    return null;
+  }
+  const data = (await res.json()) as {
+    files?: Array<{ id: string; name: string; size?: string; modifiedTime?: string; webViewLink?: string }>;
+  };
+  const files = data.files || [];
+  const sqliteFile = files.find((f) => f.name === 'sdglobal-crm-live.db' && Number(f.size || 0) > 0);
+  if (sqliteFile) {
+    return {
+      fileId: sqliteFile.id,
+      fileName: sqliteFile.name,
+      kind: 'sqlite',
+      sizeBytes: Number(sqliteFile.size || 0),
+      modifiedTime: sqliteFile.modifiedTime || null,
+      webViewLink: sqliteFile.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(sqliteFile.id)}/view`,
+    };
+  }
+  const jsonFile = files.find((f) => f.name === 'sdglobal-crm-full-snapshot.json' && Number(f.size || 0) > 0);
+  if (jsonFile) {
+    return {
+      fileId: jsonFile.id,
+      fileName: jsonFile.name,
+      kind: 'json',
+      sizeBytes: Number(jsonFile.size || 0),
+      modifiedTime: jsonFile.modifiedTime || null,
+      webViewLink: jsonFile.webViewLink || `https://drive.google.com/file/d/${encodeURIComponent(jsonFile.id)}/view`,
+    };
+  }
+  return null;
+}
+
 export async function verifyTargetDriveFolder(params: {
   driveFolderUrl?: string;
   actorUser: AuthUser;
@@ -152,6 +266,8 @@ export async function verifyTargetDriveFolder(params: {
   const verified = await verifyFolderAccess(activeDriveSession.accessToken, folderId);
   if (folderId === cfg.drive_folder_id) {
     verifiedFolderAccess = verified;
+    const remote = await inspectRemoteDriveBackup(activeDriveSession.accessToken, folderId).catch(() => null);
+    remoteRecoveryAvailable = remote && isLocalDatabaseFresh() ? remote : null;
   }
   db.prepare(
     `UPDATE google_drive_sync_config
@@ -167,7 +283,12 @@ export async function registerGoogleDriveSession(params: {
   accessToken: string;
   actorUser: AuthUser;
   confirmSync?: boolean;
-}): Promise<{ email?: string; displayName?: string; folderAccess?: VerifiedFolderAccess | null }> {
+}): Promise<{
+  email?: string;
+  displayName?: string;
+  folderAccess?: VerifiedFolderAccess | null;
+  remoteRecoveryAvailable?: RemoteRecoveryInfo | null;
+}> {
   const profile = await validateGoogleAccessToken(params.accessToken);
   activeDriveSession = {
     accessToken: params.accessToken,
@@ -175,13 +296,18 @@ export async function registerGoogleDriveSession(params: {
     displayName: profile.displayName,
     setAt: new Date().toISOString(),
   };
+  consecutiveErrors = 0;
+  nextRetryAt = 0;
 
   const cfg = getDriveConfigRow();
   let folderCheckError: string | null = null;
   try {
     verifiedFolderAccess = await verifyFolderAccess(params.accessToken, cfg.drive_folder_id);
+    const remoteBackup = await inspectRemoteDriveBackup(params.accessToken, cfg.drive_folder_id).catch(() => null);
+    remoteRecoveryAvailable = remoteBackup && isLocalDatabaseFresh() ? remoteBackup : null;
   } catch (err: any) {
     verifiedFolderAccess = null;
+    remoteRecoveryAvailable = null;
     folderCheckError = err?.message || 'Unable to access target Google Drive folder.';
   }
 
@@ -223,16 +349,20 @@ export async function registerGoogleDriveSession(params: {
       google_email: activeDriveSession.email || null,
       sync_confirmed: Boolean(params.confirmSync),
       folder_verified: Boolean(verifiedFolderAccess),
+      remote_recovery_detected: Boolean(remoteRecoveryAvailable),
     },
   });
 
   emitStatusUpdate();
-  return { ...profile, folderAccess: verifiedFolderAccess };
+  return { ...profile, folderAccess: verifiedFolderAccess, remoteRecoveryAvailable };
 }
 
 export function clearGoogleDriveSession(actorUser?: AuthUser | null) {
   activeDriveSession = null;
   verifiedFolderAccess = null;
+  remoteRecoveryAvailable = null;
+  consecutiveErrors = 0;
+  nextRetryAt = 0;
   db.prepare(
     `UPDATE google_drive_sync_config
      SET last_status = 'awaiting_auth',
@@ -250,6 +380,127 @@ export function clearGoogleDriveSession(actorUser?: AuthUser | null) {
     });
   }
   emitStatusUpdate();
+}
+
+export async function restoreDatabaseFromGoogleDrive(actorUser: AuthUser): Promise<{
+  ok: true;
+  restoredFileName: string;
+  preRestoreFilename: string;
+}> {
+  if (!activeDriveSession?.accessToken) {
+    throw new Error('Sign in with Google first to restore the database from Google Drive.');
+  }
+
+  const accessToken = activeDriveSession.accessToken;
+  const connectedEmail = activeDriveSession.email || null;
+  const cfg = getDriveConfigRow();
+  const remoteBackup =
+    remoteRecoveryAvailable || (await inspectRemoteDriveBackup(accessToken, cfg.drive_folder_id));
+
+  if (!remoteBackup || remoteBackup.kind !== 'sqlite') {
+    throw new Error(
+      'No valid SQLite database file (sdglobal-crm-live.db) was found in the linked Google Drive folder.'
+    );
+  }
+
+  const downloadUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(
+    remoteBackup.fileId
+  )}?alt=media&supportsAllDrives=true`;
+  const dlRes = await fetch(downloadUrl, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!dlRes.ok) {
+    if (dlRes.status === 401) {
+      activeDriveSession = null;
+      verifiedFolderAccess = null;
+      emitStatusUpdate();
+      throw new Error('Google Drive OAuth token expired (401). Please sign in with Google again.');
+    }
+    const errTxt = await dlRes.text().catch(() => '');
+    throw new Error(`Failed to download database from Google Drive (${dlRes.status}): ${errTxt.slice(0, 180)}`);
+  }
+
+  const fileBytes = Buffer.from(await dlRes.arrayBuffer());
+  if (fileBytes.byteLength < 1024) {
+    throw new Error('Downloaded Google Drive database file appears empty or incomplete.');
+  }
+
+  const tmpRestorePath = path.join(os.tmpdir(), `sdglobal-drive-restore-${process.pid}-${Date.now()}.db`);
+  try {
+    fs.writeFileSync(tmpRestorePath, fileBytes);
+    const { preRestoreFilename } = await restoreDatabaseFromFile(tmpRestorePath);
+
+    syncDepartmentDropdownOptions();
+    syncLocationTypeDropdownOptions();
+
+    const latestSeqAfter = (
+      db.prepare('SELECT COALESCE(MAX(seq), 0) as m FROM drive_sync_changelog').get() as { m: number }
+    ).m;
+    lastDbSnapshotSeq = latestSeqAfter;
+    remoteRecoveryAvailable = null;
+
+    const validActorRow = db.prepare('SELECT id FROM users WHERE id = ?').get(actorUser.id) as { id: number } | undefined;
+    const safeUpdatedBy = validActorRow?.id ?? null;
+
+    db.prepare(
+      `INSERT INTO google_drive_sync_config (
+        id, drive_folder_url, drive_folder_id, sync_interval_ms, sync_enabled, sync_confirmed,
+        last_synced_seq, last_synced_at, last_status, last_error, connected_google_email, updated_by, updated_at
+      ) VALUES (1, ?, ?, ?, 1, 1, ?, datetime('now'), 'synced', NULL, ?, ?, datetime('now'))
+      ON CONFLICT(id) DO UPDATE SET
+        drive_folder_url = excluded.drive_folder_url,
+        drive_folder_id = excluded.drive_folder_id,
+        sync_interval_ms = excluded.sync_interval_ms,
+        sync_enabled = 1,
+        sync_confirmed = 1,
+        last_synced_seq = excluded.last_synced_seq,
+        last_status = 'synced',
+        last_error = NULL,
+        connected_google_email = COALESCE(excluded.connected_google_email, google_drive_sync_config.connected_google_email),
+        updated_by = excluded.updated_by,
+        updated_at = datetime('now')`
+    ).run(
+      cfg.drive_folder_url,
+      cfg.drive_folder_id,
+      Math.max(1000, cfg.sync_interval_ms || 1000),
+      latestSeqAfter,
+      connectedEmail,
+      safeUpdatedBy
+    );
+
+    writeAuditLog({
+      userId: safeUpdatedBy,
+      userEmail: actorUser.email,
+      roleName: actorUser.role,
+      action: 'RESTORE_FROM_GOOGLE_DRIVE',
+      entityType: 'database',
+      entityId: remoteBackup.fileId,
+      details: {
+        file_name: remoteBackup.fileName,
+        size_bytes: remoteBackup.sizeBytes,
+        pre_restore_filename: preRestoreFilename,
+      },
+    });
+
+    emitStatusUpdate();
+    broadcastAll('system:restored', {
+      source: 'google_drive',
+      filename: remoteBackup.fileName,
+      restored_at: new Date().toISOString(),
+    });
+
+    return {
+      ok: true,
+      restoredFileName: remoteBackup.fileName,
+      preRestoreFilename,
+    };
+  } finally {
+    try {
+      if (fs.existsSync(tmpRestorePath)) fs.unlinkSync(tmpRestorePath);
+    } catch {
+      // ignore temp cleanup failure
+    }
+  }
 }
 
 export async function updateGoogleDriveConfig(params: {
@@ -369,6 +620,7 @@ export function getGoogleDriveStatus() {
     },
     driveFolderHref,
     folderAccess: verifiedFolderAccess?.id === cfg.drive_folder_id ? verifiedFolderAccess : null,
+    remoteRecoveryAvailable: remoteRecoveryAvailable && isLocalDatabaseFresh() ? remoteRecoveryAvailable : null,
     tokenActive: Boolean(activeDriveSession?.accessToken),
     connectedAccount: activeDriveSession
       ? {
@@ -380,6 +632,9 @@ export function getGoogleDriveStatus() {
     pendingChanges,
     latestSeq,
     syncInFlight,
+    consecutiveErrors,
+    nextRetryAt: nextRetryAt > Date.now() ? new Date(nextRetryAt).toISOString() : null,
+    lastSuccessfulSyncAt: lastSuccessfulSyncAt || cfg.last_synced_at,
     files,
     recentChangelog,
   };
@@ -608,7 +863,7 @@ async function listFolderFilesByName(accessToken: string, folderId: string): Pro
   const url =
     `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}` +
     '&fields=files(id,name)&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true';
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     headers: { Authorization: `Bearer ${accessToken}` },
   });
   if (!res.ok) {
@@ -656,7 +911,7 @@ async function uploadOrUpdateDriveFile(params: {
     ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(params.existingFileId)}?uploadType=multipart&supportsAllDrives=true`
     : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true';
 
-  const res = await fetch(endpoint, {
+  const res = await fetchWithRetry(endpoint, {
     method: params.existingFileId ? 'PATCH' : 'POST',
     headers: {
       Authorization: `Bearer ${params.accessToken}`,
@@ -698,10 +953,19 @@ export async function runGoogleDriveSyncCycle(options?: {
   }
 
   if (!options?.force) {
+    if (remoteRecoveryAvailable && isLocalDatabaseFresh()) {
+      return { synced: false, filesUpdated: 0, skippedReason: 'recovery_pending' };
+    }
+    if (nextRetryAt > Date.now()) {
+      return { synced: false, filesUpdated: 0, skippedReason: 'backoff_wait' };
+    }
     const intervalMs = Math.max(1000, cfg.sync_interval_ms || 1000);
-    if (Date.now() - lastCycleFinishedAt < intervalMs - 100) {
+    if (Date.now() - lastCycleStartedAt < intervalMs - 100) {
       return { synced: false, filesUpdated: 0, skippedReason: 'interval_wait' };
     }
+  } else {
+    remoteRecoveryAvailable = null;
+    nextRetryAt = 0;
   }
 
   const latestSeq = (db.prepare('SELECT COALESCE(MAX(seq), 0) as m FROM drive_sync_changelog').get() as { m: number }).m;
@@ -714,6 +978,7 @@ export async function runGoogleDriveSyncCycle(options?: {
   }
 
   syncInFlight = true;
+  lastCycleStartedAt = Date.now();
   const nowIso = new Date().toISOString();
 
   try {
@@ -774,7 +1039,38 @@ export async function runGoogleDriveSyncCycle(options?: {
       }
     }
 
-    let filesUpdated = 0;
+    // Compute SHA-256 and filter to only modified files so every 1-second cycle finishes fast
+    const pendingUploads: Array<{ ds: SyncPayloadSpec; sha256: string; targetFileId?: string }> = [];
+    for (const ds of datasets) {
+      const sha256 = crypto.createHash('sha256').update(ds.content).digest('hex');
+      const existingMap = mappedByKey.get(ds.entityKey);
+
+      if (!options?.force && existingMap && existingMap.content_sha256 === sha256) {
+        continue;
+      }
+
+      if (!existingMap && !remoteFilesByName) {
+        remoteFilesByName = await listFolderFilesByName(accessToken, folderId);
+      }
+
+      const targetFileId = existingMap?.drive_file_id || remoteFilesByName?.get(ds.fileName);
+      pendingUploads.push({ ds, sha256, targetFileId });
+    }
+
+    const uploadResults = await Promise.all(
+      pendingUploads.map(async ({ ds, sha256, targetFileId }) => {
+        const driveFileId = await uploadOrUpdateDriveFile({
+          accessToken,
+          folderId,
+          existingFileId: targetFileId,
+          fileName: ds.fileName,
+          mimeType: ds.mimeType,
+          content: ds.content,
+        });
+        return { ds, sha256, driveFileId };
+      })
+    );
+
     const upsertMap = db.prepare(
       `INSERT INTO google_drive_file_map (
         entity_key, folder_id, drive_file_id, file_name, mime_type, content_sha256, record_count, byte_size, last_synced_at
@@ -789,42 +1085,24 @@ export async function runGoogleDriveSyncCycle(options?: {
         last_synced_at = excluded.last_synced_at`
     );
 
-    for (const ds of datasets) {
-      const sha256 = crypto.createHash('sha256').update(ds.content).digest('hex');
-      const existingMap = mappedByKey.get(ds.entityKey);
-
-      if (!options?.force && existingMap && existingMap.content_sha256 === sha256) {
-        continue;
+    const applyMapUpdates = db.transaction(() => {
+      for (const item of uploadResults) {
+        upsertMap.run(
+          item.ds.entityKey,
+          folderId,
+          item.driveFileId,
+          item.ds.fileName,
+          item.ds.mimeType,
+          item.sha256,
+          item.ds.recordCount,
+          item.ds.content.byteLength,
+          nowIso
+        );
       }
+    });
+    applyMapUpdates();
 
-      if (!existingMap && !remoteFilesByName) {
-        remoteFilesByName = await listFolderFilesByName(accessToken, folderId);
-      }
-
-      const targetFileId = existingMap?.drive_file_id || remoteFilesByName?.get(ds.fileName);
-
-      const driveFileId = await uploadOrUpdateDriveFile({
-        accessToken,
-        folderId,
-        existingFileId: targetFileId,
-        fileName: ds.fileName,
-        mimeType: ds.mimeType,
-        content: ds.content,
-      });
-
-      upsertMap.run(
-        ds.entityKey,
-        folderId,
-        driveFileId,
-        ds.fileName,
-        ds.mimeType,
-        sha256,
-        ds.recordCount,
-        ds.content.byteLength,
-        nowIso
-      );
-      filesUpdated += 1;
-    }
+    const filesUpdated = uploadResults.length;
 
     db.prepare(
       `UPDATE google_drive_sync_config
@@ -853,6 +1131,10 @@ export async function runGoogleDriveSyncCycle(options?: {
       });
     }
 
+    consecutiveErrors = 0;
+    nextRetryAt = 0;
+    lastSuccessfulSyncAt = nowIso;
+
     emitStatusUpdate();
     return { synced: true, filesUpdated };
   } catch (err: any) {
@@ -860,6 +1142,12 @@ export async function runGoogleDriveSyncCycle(options?: {
     if (isAuthErr) {
       activeDriveSession = null;
       verifiedFolderAccess = null;
+      consecutiveErrors = 0;
+      nextRetryAt = 0;
+    } else {
+      consecutiveErrors += 1;
+      const backoffMs = Math.min(60_000, 1000 * Math.pow(2, Math.min(consecutiveErrors, 6)));
+      nextRetryAt = Date.now() + backoffMs;
     }
     db.prepare(
       `UPDATE google_drive_sync_config
@@ -875,7 +1163,6 @@ export async function runGoogleDriveSyncCycle(options?: {
     }
     return { synced: false, filesUpdated: 0, skippedReason: isAuthErr ? 'awaiting_auth' : 'error' };
   } finally {
-    lastCycleFinishedAt = Date.now();
     syncInFlight = false;
   }
 }
@@ -923,6 +1210,11 @@ export async function deleteSyncedDriveFile(driveFileId: string, actorUser: Auth
 export function startGoogleDriveSyncLoop() {
   if (syncLoopTimer) return;
   syncLoopTimer = setInterval(() => {
+    try {
+      checkAndNotifyCloudDbMutation();
+    } catch {
+      // ignore mutation check errors
+    }
     runGoogleDriveSyncCycle().catch(() => {
       // Errors are captured and surfaced cleanly in status
     });

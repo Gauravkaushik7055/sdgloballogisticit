@@ -34,6 +34,32 @@ import { restoreStoredBackup, runCrmBackup, verifyStoredBackup } from '../backup
 const router = Router();
 const MFA_CHALLENGE_SECRET = process.env.JWT_SECRET || 'logicore-dev-secret-change-in-production';
 
+function getCookieSecurityFlags(req: any) {
+  const forwardedProto = String(req.get?.('x-forwarded-proto') || req.headers?.['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const isHttps = Boolean(req.secure || forwardedProto === 'https');
+  return isHttps
+    ? { httpOnly: true, secure: true, sameSite: 'none' as const, path: '/' }
+    : { httpOnly: true, secure: false, sameSite: 'lax' as const, path: '/' };
+}
+
+function setAuthSessionCookie(req: any, res: any, token: string) {
+  const policy = getSessionSecurityPolicy();
+  const maxAge = policy.continuousSession
+    ? 365 * 24 * 60 * 60 * 1000
+    : Math.max(12 * 60 * 60 * 1000, policy.idleTimeoutMinutes * 60_000);
+  res.cookie('logicore_token', token, {
+    ...getCookieSecurityFlags(req),
+    maxAge,
+  });
+}
+
+function clearAuthSessionCookie(req: any, res: any) {
+  res.clearCookie('logicore_token', getCookieSecurityFlags(req));
+}
+
 function buildFullLoginResponse(user: any, req: any, loginAction: string, extraDetails?: Record<string, unknown>) {
   const employee = db.prepare('SELECT id FROM employees WHERE user_id = ?').get(user.id) as { id: number } | undefined;
   const moderator = db.prepare('SELECT id FROM moderators WHERE user_id = ?').get(user.id) as { id: number } | undefined;
@@ -209,12 +235,7 @@ router.post('/login', (req, res) => {
     portal_mode === 'moderator_common' ? { via: 'common_moderator_link' } : undefined
   );
 
-  res.cookie('logicore_token', loginResult.token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    maxAge: 12 * 60 * 60 * 1000,
-  });
+  setAuthSessionCookie(req, res, loginResult.token);
 
   res.json(loginResult);
 });
@@ -296,12 +317,7 @@ router.post('/mfa/verify-login', (req, res) => {
     { portal_mode: decoded.portal_mode || 'standard', used_recovery_code: usedRecovery }
   );
 
-  res.cookie('logicore_token', loginResult.token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    maxAge: 12 * 60 * 60 * 1000,
-  });
+  setAuthSessionCookie(req, res, loginResult.token);
 
   res.json(loginResult);
 });
@@ -476,12 +492,7 @@ router.post('/invite-login', (req, res) => {
     ipAddress: req.ip,
   });
 
-  res.cookie('logicore_token', jwtToken, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    maxAge: 12 * 60 * 60 * 1000,
-  });
+  setAuthSessionCookie(req, res, jwtToken);
 
   res.json({
     token: jwtToken,
@@ -806,12 +817,7 @@ router.post('/employee-otp/verify', (req, res) => {
     employeeId: employeeId!,
   });
 
-  res.cookie('logicore_token', token, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    maxAge: 12 * 60 * 60 * 1000,
-  });
+  setAuthSessionCookie(req, res, token);
 
   const employeeProfile = db
     .prepare(
@@ -857,7 +863,7 @@ router.post('/logout', requireAuth, (req: AuthRequest, res) => {
     entityId: user.session_id,
     ipAddress: req.ip,
   });
-  res.clearCookie('logicore_token', { httpOnly: true, secure: true, sameSite: 'none' });
+  clearAuthSessionCookie(req, res);
   res.json({ ok: true });
 });
 
@@ -1053,12 +1059,7 @@ router.patch('/profile', requireAuth, (req: AuthRequest, res) => {
     moderator_id: user.moderator_id ?? null,
   });
 
-  res.cookie('logicore_token', refreshedToken, {
-    httpOnly: true,
-    secure: true,
-    sameSite: 'none',
-    maxAge: 12 * 60 * 60 * 1000,
-  });
+  setAuthSessionCookie(req, res, refreshedToken);
 
   writeAuditLog({
     userId: user.id,

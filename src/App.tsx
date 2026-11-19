@@ -1,8 +1,16 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, X } from 'lucide-react';
+import { CheckCircle2, RotateCcw, X } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { DropdownProvider } from './context/DropdownContext.tsx';
 import { ThemeProvider } from './context/ThemeContext.tsx';
+import { GoogleDriveSyncStatusResponse } from './types/index.ts';
+import { apiFetch, formatDateTime } from './utils/api.ts';
+import { getGoogleAccessToken, initFirebaseCloudAuth } from './utils/googleDriveAuth.ts';
+import {
+  checkAndAutoHydrateFromCloudFirestore,
+  syncCrmToCloudFirestore,
+} from './lib/firestoreSync.ts';
+import { auth } from './lib/firebase.ts';
 import LoginPage from './components/LoginPage.tsx';
 import LiveWebPage, { PortalEntryMode } from './components/LiveWebPage.tsx';
 import Layout, { NavSection } from './components/Layout.tsx';
@@ -25,7 +33,7 @@ import IntegrationsView from './components/integrations/IntegrationsView.tsx';
 import AuditSessionsView from './components/audit/AuditSessionsView.tsx';
 
 function WorkspaceApp() {
-  const { user, loading, refreshNotifications, refreshUser } = useAuth();
+  const { user, loading, refreshNotifications, refreshUser, subscribeRealtime } = useAuth();
   const [activeSection, setActiveSection] = useState<NavSection>('dashboard');
   const [newTicketOpen, setNewTicketOpen] = useState(false);
   const [selectedTicketId, setSelectedTicketId] = useState<number | null>(null);
@@ -36,6 +44,8 @@ function WorkspaceApp() {
   const [ticketPreset, setTicketPreset] = useState<{ key: number; queueFilter?: TicketQueuePreset } | null>(null);
   const [modStatusPreset, setModStatusPreset] = useState<{ key: number; status: 'All' | 'Active' | 'Inactive' } | null>(null);
   const [reportPreset, setReportPreset] = useState<{ key: number; reportType: string } | null>(null);
+  const [driveRecoveryPrompt, setDriveRecoveryPrompt] = useState<GoogleDriveSyncStatusResponse['remoteRecoveryAvailable']>(null);
+  const [restoringDriveDb, setRestoringDriveDb] = useState(false);
 
   const [showLivePage, setShowLivePage] = useState<boolean>(() => {
     const pathname = window.location.pathname.replace(/\/+$/, '');
@@ -57,6 +67,74 @@ function WorkspaceApp() {
       setShowLivePage(false);
     }
   }, [user?.id]);
+
+  // Lifetime Cloud Web Database (Firebase Firestore): Auto-recover on fresh container boot
+  useEffect(() => {
+    const unsub = initFirebaseCloudAuth(async () => {
+      try {
+        const res = await checkAndAutoHydrateFromCloudFirestore();
+        if (res.restored) {
+          setDriveRecoveryPrompt(null);
+          setRefreshTrigger((n) => n + 1);
+          refreshNotifications();
+          refreshUser();
+          setCreatedBanner(
+            `CRM automatically restored from Lifetime Cloud Database (${res.restoredCount} records recovered).`
+          );
+        }
+      } catch {
+        // Error surfaced cleanly via cloudDbStatus in IntegrationsView
+      }
+    });
+    return () => unsub();
+  }, [refreshNotifications, refreshUser]);
+
+  // Continuous real-time sync to Cloud Firestore & Google Drive recovery monitoring for Super Admin
+  useEffect(() => {
+    if (!user || user.role !== 'super_admin') {
+      setDriveRecoveryPrompt(null);
+      return;
+    }
+
+    if (auth.currentUser) {
+      syncCrmToCloudFirestore().catch(() => {});
+    }
+
+    apiFetch<GoogleDriveSyncStatusResponse>('/api/integrations/google-drive/status')
+      .then((res) => {
+        if (res?.remoteRecoveryAvailable) {
+          setDriveRecoveryPrompt(res.remoteRecoveryAvailable);
+        }
+      })
+      .catch(() => {});
+
+    let cloudSyncTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubWs = subscribeRealtime((evt) => {
+      if (evt.event === 'cloud_db:mutated') {
+        if (auth.currentUser) {
+          if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+          cloudSyncTimer = setTimeout(() => {
+            syncCrmToCloudFirestore().catch(() => {});
+          }, 500);
+        }
+      } else if (evt.event === 'drive_sync:updated' && evt.data) {
+        const status = evt.data as GoogleDriveSyncStatusResponse;
+        setDriveRecoveryPrompt(status.remoteRecoveryAvailable || null);
+      } else if (evt.event === 'system:restored') {
+        setDriveRecoveryPrompt(null);
+        setRefreshTrigger((n) => n + 1);
+        refreshNotifications();
+        refreshUser();
+        const src = evt.data?.source === 'cloud_firestore' ? 'Lifetime Cloud Database' : 'Google Drive';
+        setCreatedBanner(`CRM database restored from ${src} and real-time autosync resumed.`);
+      }
+    });
+
+    return () => {
+      if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+      unsubWs();
+    };
+  }, [user?.id, user?.role, subscribeRealtime, refreshNotifications, refreshUser]);
 
   if (loading) {
     return (
@@ -283,6 +361,65 @@ function WorkspaceApp() {
           user.role !== 'management' || user.permissions?.can_view_chats !== false ? handleOpenDirectChat : undefined
         }
       />
+
+      {driveRecoveryPrompt && activeSection !== 'integrations' && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <RotateCcw className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
+                  Existing Database Found in Google Drive
+                </h4>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1.5 leading-relaxed">
+                  The server restarted with a fresh local database, and your saved backup{' '}
+                  <span className="font-mono font-semibold">{driveRecoveryPrompt.fileName}</span> is ready in Google Drive. Restore it now to recover your saved data and resume 1-second autosync?
+                </p>
+                {driveRecoveryPrompt.modifiedTime && (
+                  <div className="mt-2 text-[11px] font-mono text-slate-500">
+                    Last Synced: {formatDateTime(driveRecoveryPrompt.modifiedTime)}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={restoringDriveDb}
+                onClick={() => setDriveRecoveryPrompt(null)}
+                className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 cursor-pointer"
+              >
+                Later
+              </button>
+              <button
+                type="button"
+                disabled={restoringDriveDb}
+                onClick={async () => {
+                  setRestoringDriveDb(true);
+                  try {
+                    const token = getGoogleAccessToken();
+                    await apiFetch('/api/integrations/google-drive/restore-from-drive', {
+                      method: 'POST',
+                      headers: token ? { 'X-Google-Access-Token': token } : undefined,
+                    });
+                    setDriveRecoveryPrompt(null);
+                    bumpRefresh();
+                    refreshUser();
+                  } catch {
+                    setDriveRecoveryPrompt(null);
+                    setActiveSection('integrations');
+                  } finally {
+                    setRestoringDriveDb(false);
+                  }
+                }}
+                className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 cursor-pointer"
+              >
+                {restoringDriveDb ? 'Restoring...' : 'Restore Database Now'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </Layout>
   );
 }

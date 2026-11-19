@@ -161,7 +161,22 @@ export function attachRealtimeWebSocket(server: HttpServer) {
         return;
       }
 
-      const token = url.searchParams.get('token') || '';
+      let token = url.searchParams.get('token') || '';
+      if (!token && request.headers.cookie) {
+        for (const part of request.headers.cookie.split(';')) {
+          const idx = part.indexOf('=');
+          if (idx === -1) continue;
+          const k = part.slice(0, idx).trim();
+          if (k === 'logicore_token') {
+            try {
+              token = decodeURIComponent(part.slice(idx + 1).trim());
+            } catch {
+              token = part.slice(idx + 1).trim();
+            }
+            break;
+          }
+        }
+      }
       if (!token) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();

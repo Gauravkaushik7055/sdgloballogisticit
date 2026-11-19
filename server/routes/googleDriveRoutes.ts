@@ -5,6 +5,7 @@ import {
   deleteSyncedDriveFile,
   getGoogleDriveStatus,
   registerGoogleDriveSession,
+  restoreDatabaseFromGoogleDrive,
   runGoogleDriveSyncCycle,
   updateGoogleDriveConfig,
   verifyTargetDriveFolder,
@@ -107,6 +108,23 @@ router.post('/integrations/google-drive/verify-folder', requireAuth, requireRole
     res.json({ ok: true, folder, status: getGoogleDriveStatus() });
   } catch (err: any) {
     res.status(400).json({ error: err?.message || 'Unable to verify Google Drive folder access.' });
+  }
+});
+
+router.post('/integrations/google-drive/restore-from-drive', requireAuth, requireRole('super_admin'), async (req: AuthRequest, res) => {
+  try {
+    const incomingToken = extractGoogleToken(req);
+    if (incomingToken) {
+      await registerGoogleDriveSession({
+        accessToken: incomingToken,
+        actorUser: req.user!,
+        confirmSync: false,
+      });
+    }
+    const result = await restoreDatabaseFromGoogleDrive(req.user!);
+    res.json({ ...result, status: getGoogleDriveStatus() });
+  } catch (err: any) {
+    res.status(400).json({ error: err?.message || 'Failed to restore database from Google Drive.' });
   }
 });
 

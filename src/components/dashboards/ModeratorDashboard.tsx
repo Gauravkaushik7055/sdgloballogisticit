@@ -21,14 +21,20 @@ export default function ModeratorDashboard({
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [rejectingId, setRejectingId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
 
   const loadData = useCallback(async () => {
-    const [tRes, mRes] = await Promise.all([
-      apiFetch<{ tickets: TicketItem[] }>('/api/tickets'),
-      apiFetch<{ moderators: ModeratorItem[] }>('/api/moderators?period=monthly'),
-    ]);
-    setTickets(tRes.tickets);
-    setMyStats(mRes.moderators[0] || null);
+    try {
+      const [tRes, mRes] = await Promise.all([
+        apiFetch<{ tickets: TicketItem[] }>('/api/tickets'),
+        apiFetch<{ moderators: ModeratorItem[] }>('/api/moderators?period=monthly'),
+      ]);
+      setTickets(tRes.tickets);
+      setMyStats(mRes.moderators[0] || null);
+      setErrorMsg('');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Unable to refresh moderator tasks.');
+    }
   }, []);
 
   useEffect(() => {
@@ -67,17 +73,30 @@ export default function ModeratorDashboard({
       : tickets.filter((t) => t.status === statusFilter);
 
   const handleRespond = async (ticketId: number, decision: 'accept' | 'reject') => {
-    await apiFetch(`/api/tickets/${ticketId}/respond-assignment`, {
-      method: 'POST',
-      body: JSON.stringify({ decision, reason: rejectReason }),
-    });
-    setRejectingId(null);
-    setRejectReason('');
-    loadData();
+    setErrorMsg('');
+    try {
+      await apiFetch(`/api/tickets/${ticketId}/respond-assignment`, {
+        method: 'POST',
+        body: JSON.stringify({ decision, reason: rejectReason }),
+      });
+      setRejectingId(null);
+      setRejectReason('');
+      await loadData();
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Failed to update assignment decision.');
+    }
   };
 
   return (
     <div className="space-y-6">
+      {errorMsg && (
+        <div className="px-4 py-2.5 text-xs rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 flex items-center justify-between gap-2">
+          <span>{errorMsg}</span>
+          <button type="button" onClick={() => setErrorMsg('')} className="font-semibold hover:underline cursor-pointer">
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Header Summary + Direct Chat with Super Admin */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
         <div>

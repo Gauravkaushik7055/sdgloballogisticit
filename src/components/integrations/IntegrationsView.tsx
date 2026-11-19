@@ -16,6 +16,7 @@ import {
   Mail,
   MessageSquare,
   RefreshCw,
+  RotateCcw,
   Save,
   ShieldAlert,
   ShieldCheck,
@@ -24,7 +25,21 @@ import {
 import { useAuth } from '../../context/AuthContext.tsx';
 import { GoogleDriveSyncedFile, GoogleDriveSyncStatusResponse } from '../../types/index.ts';
 import { apiFetch, formatDateTime } from '../../utils/api.ts';
-import { getGoogleAccessToken, googleLogout, googleSignIn, initGoogleAuth } from '../../utils/googleDriveAuth.ts';
+import {
+  getGoogleAccessToken,
+  getGoogleTokenRemainingMinutes,
+  googleLogout,
+  googleSignIn,
+  initGoogleAuth,
+} from '../../utils/googleDriveAuth.ts';
+import {
+  checkAndAutoHydrateFromCloudFirestore,
+  getCloudDbStatus,
+  hydrateServerFromCloudFirestore,
+  subscribeCloudDbStatus,
+  syncCrmToCloudFirestore,
+  type CloudDbStatus,
+} from '../../lib/firestoreSync.ts';
 import { formatBytesCompact } from '../common/MediaPreviewModal.tsx';
 
 export default function IntegrationsView() {
@@ -54,8 +69,16 @@ export default function IntegrationsView() {
     syncEnabled: boolean;
   } | null>(null);
   const [confirmManualSyncModal, setConfirmManualSyncModal] = useState(false);
+  const [confirmRestoreModal, setConfirmRestoreModal] = useState(false);
+  const [restoringFromDrive, setRestoringFromDrive] = useState(false);
   const [confirmDeleteFileModal, setConfirmDeleteFileModal] = useState<GoogleDriveSyncedFile | null>(null);
   const [deletingDriveFile, setDeletingDriveFile] = useState(false);
+
+  // Lifetime Cloud Web Database (Firebase Firestore) state
+  const [cloudDbStatus, setCloudDbStatus] = useState<CloudDbStatus>(() => getCloudDbStatus());
+  const [confirmCloudRestoreModal, setConfirmCloudRestoreModal] = useState(false);
+  const [syncingCloudNow, setSyncingCloudNow] = useState(false);
+  const [restoringCloudDb, setRestoringCloudDb] = useState(false);
 
   // Outlook state
   const [outlookStatus, setOutlookStatus] = useState<any>(null);
@@ -128,6 +151,10 @@ export default function IntegrationsView() {
   }, [loadAll]);
 
   useEffect(() => {
+    return subscribeCloudDbStatus((st) => setCloudDbStatus(st));
+  }, []);
+
+  useEffect(() => {
     const unsubscribeAuth = initGoogleAuth(
       async (_gUser, token) => {
         setNeedsGoogleAuth(false);
@@ -181,6 +208,22 @@ export default function IntegrationsView() {
     setGoogleSigningIn(true);
     try {
       const { user, accessToken } = await googleSignIn();
+
+      // 1. Activate Lifetime Cloud Web Database (Firebase Firestore) immediately
+      let cloudRestored = false;
+      try {
+        const cloudCheck = await checkAndAutoHydrateFromCloudFirestore();
+        if (cloudCheck.restored) {
+          cloudRestored = true;
+          loadAll();
+        } else {
+          await syncCrmToCloudFirestore({ force: true });
+        }
+      } catch {
+        // Cloud DB status captures any error cleanly
+      }
+
+      // 2. Authorize Google Drive Folder Sync in parallel
       const res = await apiFetch<{ status: GoogleDriveSyncStatusResponse }>(
         '/api/integrations/google-drive/session',
         {
@@ -191,20 +234,66 @@ export default function IntegrationsView() {
       );
       if (res?.status) applyDriveStatus(res.status);
       setNeedsGoogleAuth(false);
-      setMsg(
-        `Signed in to Google as ${user.email || 'Authorized User'}. Confirm below to begin writing the live database and 1-second snapshots to Google Drive.`
-      );
-      if (res?.status && !res.status.config.sync_confirmed) {
-        setConfirmSaveModal({
-          driveFolderUrl: res.status.config.drive_folder_url || driveUrlDraft.trim(),
-          syncIntervalMs: res.status.config.sync_interval_ms || 1000,
-          syncEnabled: true,
-        });
+      if (cloudRestored) {
+        setMsg(
+          `Signed in as ${user.email || 'Authorized User'}. Lifetime Cloud Database restored your saved CRM records and Google Drive folder access is authorized.`
+        );
+      } else if (res?.status?.remoteRecoveryAvailable) {
+        setMsg(
+          `Signed in to Google as ${user.email || 'Authorized User'}. Existing database (${res.status.remoteRecoveryAvailable.fileName}) found in Google Drive!`
+        );
+        setConfirmRestoreModal(true);
+      } else {
+        setMsg(
+          `Signed in as ${user.email || 'Authorized User'}. Lifetime Cloud Web Database is now active (no 60-min expiry). Confirm below to also enable Google Drive folder snapshots.`
+        );
+        if (res?.status && !res.status.config.sync_confirmed) {
+          setConfirmSaveModal({
+            driveFolderUrl: res.status.config.drive_folder_url || driveUrlDraft.trim(),
+            syncIntervalMs: res.status.config.sync_interval_ms || 1000,
+            syncEnabled: true,
+          });
+        }
       }
     } catch (e: any) {
       setErr(e?.message || 'Google Sign-In failed. Ensure popups are allowed for this window.');
     } finally {
       setGoogleSigningIn(false);
+    }
+  };
+
+  const handleSyncCloudDbNow = async () => {
+    setErr('');
+    setMsg('');
+    setSyncingCloudNow(true);
+    try {
+      const res = await syncCrmToCloudFirestore({ force: true });
+      setMsg(
+        `Lifetime Cloud Database synchronized (${res.written} record(s) written, ${res.deleted} removed).`
+      );
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to sync Lifetime Cloud Database.');
+    } finally {
+      setSyncingCloudNow(false);
+    }
+  };
+
+  const handleConfirmRestoreFromCloudDb = async () => {
+    setRestoringCloudDb(true);
+    setErr('');
+    setMsg('');
+    try {
+      const res = await hydrateServerFromCloudFirestore('manual');
+      setConfirmCloudRestoreModal(false);
+      setMsg(
+        `Restored ${res.restoredCount} records from your Lifetime Cloud Web Database (Firebase Firestore).`
+      );
+      loadAll();
+    } catch (e: any) {
+      setConfirmCloudRestoreModal(false);
+      setErr(e?.message || 'Failed to restore from Lifetime Cloud Database.');
+    } finally {
+      setRestoringCloudDb(false);
     }
   };
 
@@ -323,15 +412,48 @@ export default function IntegrationsView() {
     }
   };
 
+  const handleConfirmRestoreFromDrive = async () => {
+    setRestoringFromDrive(true);
+    setErr('');
+    setMsg('');
+    try {
+      const token = getGoogleAccessToken();
+      const res = await apiFetch<{
+        ok: boolean;
+        restoredFileName: string;
+        preRestoreFilename: string;
+        status: GoogleDriveSyncStatusResponse;
+      }>('/api/integrations/google-drive/restore-from-drive', {
+        method: 'POST',
+        headers: token ? { 'X-Google-Access-Token': token } : undefined,
+      });
+      setConfirmRestoreModal(false);
+      if (res?.status) applyDriveStatus(res.status);
+      setMsg(
+        `Restored live database from Google Drive (${res.restoredFileName}) and resumed 1-second continuous autosync.`
+      );
+      loadAll();
+    } catch (e: any) {
+      setConfirmRestoreModal(false);
+      setErr(e?.message || 'Failed to restore database from Google Drive.');
+    } finally {
+      setRestoringFromDrive(false);
+    }
+  };
+
   const handleConfirmDeleteDriveFile = async () => {
     if (!confirmDeleteFileModal) return;
     setDeletingDriveFile(true);
     setErr('');
     setMsg('');
     try {
+      const token = getGoogleAccessToken();
       const res = await apiFetch<{ status: GoogleDriveSyncStatusResponse }>(
         `/api/integrations/google-drive/files/${encodeURIComponent(confirmDeleteFileModal.drive_file_id)}`,
-        { method: 'DELETE' }
+        {
+          method: 'DELETE',
+          headers: token ? { 'X-Google-Access-Token': token } : undefined,
+        }
       );
       if (res?.status) applyDriveStatus(res.status);
       setMsg(`Deleted "${confirmDeleteFileModal.file_name}" from Google Drive.`);
@@ -348,20 +470,24 @@ export default function IntegrationsView() {
     e.preventDefault();
     setErr('');
     setMsg('');
-    await apiFetch('/api/integrations/outlook/config', {
-      method: 'POST',
-      body: JSON.stringify({
-        clientId: oClientId || undefined,
-        clientSecret: oClientSecret || undefined,
-        tenantId: oTenantId,
-        autoNotifyOnCreate: oAutoCreate,
-        autoNotifyOnAssign: oAutoAssign,
-        autoNotifyOnResolve: oAutoResolve,
-      }),
-    });
-    setOClientSecret('');
-    setMsg('Outlook OAuth settings saved securely on server.');
-    loadAll();
+    try {
+      await apiFetch('/api/integrations/outlook/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          clientId: oClientId || undefined,
+          clientSecret: oClientSecret || undefined,
+          tenantId: oTenantId,
+          autoNotifyOnCreate: oAutoCreate,
+          autoNotifyOnAssign: oAutoAssign,
+          autoNotifyOnResolve: oAutoResolve,
+        }),
+      });
+      setOClientSecret('');
+      setMsg('Outlook OAuth settings saved securely on server.');
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to save Outlook settings.');
+    }
   };
 
   const handleConnectOutlook = async () => {
@@ -378,12 +504,17 @@ export default function IntegrationsView() {
   };
 
   const handleDisconnectOutlook = async () => {
-    await apiFetch('/api/integrations/outlook/config', {
-      method: 'POST',
-      body: JSON.stringify({ disconnect: true }),
-    });
-    setMsg('Outlook account disconnected.');
-    loadAll();
+    setErr('');
+    try {
+      await apiFetch('/api/integrations/outlook/config', {
+        method: 'POST',
+        body: JSON.stringify({ disconnect: true }),
+      });
+      setMsg('Outlook account disconnected.');
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to disconnect Outlook.');
+    }
   };
 
   const handleSyncOutlookInbox = async () => {
@@ -391,53 +522,68 @@ export default function IntegrationsView() {
     try {
       const res = await apiFetch<{ synced: number }>('/api/integrations/outlook/sync-inbox', { method: 'POST' });
       setMsg(`Synced ${res.synced} new inbound email(s) from Microsoft Graph.`);
-      loadAll();
+      await loadAll();
     } catch (e: any) {
-      setErr(e.message);
+      setErr(e?.message || 'Failed to sync Outlook inbox.');
     }
   };
 
   const handleLinkEmailToTicket = async (emailId: number, ticketId: string) => {
     if (!ticketId) return;
-    await apiFetch('/api/integrations/outlook/link-ticket', {
-      method: 'POST',
-      body: JSON.stringify({ email_id: emailId, ticket_id: Number(ticketId) }),
-    });
-    loadAll();
+    setErr('');
+    try {
+      await apiFetch('/api/integrations/outlook/link-ticket', {
+        method: 'POST',
+        body: JSON.stringify({ email_id: emailId, ticket_id: Number(ticketId) }),
+      });
+      setMsg('Email linked to ticket.');
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to link email to ticket.');
+    }
   };
 
   const handleSaveWhatsAppConfig = async (e: React.FormEvent) => {
     e.preventDefault();
     setErr('');
     setMsg('');
-    await apiFetch('/api/integrations/whatsapp/config', {
-      method: 'POST',
-      body: JSON.stringify({
-        wabaId,
-        phoneNumberId,
-        accessToken: waToken || undefined,
-        webhookVerifyToken: waVerifyToken || undefined,
-        enabled: waEnabled,
-        templates: {
-          ticket_created: tplCreated,
-          moderator_assigned: tplAssigned,
-          ticket_progress: tplProgress,
-          ticket_resolved: tplResolved,
-        },
-      }),
-    });
-    setWaToken('');
-    setMsg('Meta WhatsApp Cloud API settings saved securely.');
-    loadAll();
+    try {
+      await apiFetch('/api/integrations/whatsapp/config', {
+        method: 'POST',
+        body: JSON.stringify({
+          wabaId,
+          phoneNumberId,
+          accessToken: waToken || undefined,
+          webhookVerifyToken: waVerifyToken || undefined,
+          enabled: waEnabled,
+          templates: {
+            ticket_created: tplCreated,
+            moderator_assigned: tplAssigned,
+            ticket_progress: tplProgress,
+            ticket_resolved: tplResolved,
+          },
+        }),
+      });
+      setWaToken('');
+      setMsg('Meta WhatsApp Cloud API settings saved securely.');
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to save WhatsApp settings.');
+    }
   };
 
   const handleSaveSla = async (cfg: any) => {
-    await apiFetch(`/api/sla-configs/${cfg.id}`, {
-      method: 'PUT',
-      body: JSON.stringify(cfg),
-    });
-    setMsg(`Updated ${cfg.priority} SLA policy.`);
-    loadAll();
+    setErr('');
+    try {
+      await apiFetch(`/api/sla-configs/${cfg.id}`, {
+        method: 'PUT',
+        body: JSON.stringify(cfg),
+      });
+      setMsg(`Updated ${cfg.priority} SLA policy.`);
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || 'Failed to update SLA policy.');
+    }
   };
 
   const runtimeOrigin = window.location.origin;
@@ -454,7 +600,7 @@ export default function IntegrationsView() {
           }`}
         >
           <HardDrive className="w-3.5 h-3.5 text-blue-600" />
-          Google Drive Continuous Sync
+          Cloud DB &amp; Google Drive Sync
         </button>
         <button
           type="button"
@@ -509,21 +655,132 @@ export default function IntegrationsView() {
         </div>
       )}
 
-      {/* TAB: GOOGLE DRIVE CONTINUOUS SYNC */}
+      {/* TAB: CLOUD DB & GOOGLE DRIVE CONTINUOUS SYNC */}
       {tab === 'drive' && (
         <div className="space-y-6">
+          {/* Lifetime Always-On Cloud Web Database Card */}
+          <div className="bg-white dark:bg-slate-900 border border-emerald-200 dark:border-emerald-900/70 rounded-xl p-6 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="space-y-1 max-w-2xl">
+                <div className="inline-flex items-center gap-2 text-xs font-semibold text-emerald-700 dark:text-emerald-400">
+                  <Database className="w-4 h-4" />
+                  <span>Lifetime Always-On Cloud Web Database (No 60-Minute Expiry)</span>
+                </div>
+                <h2 className="text-base font-display font-bold text-slate-900 dark:text-white">
+                  Persistent Cloud Firestore Database
+                </h2>
+                <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
+                  All CRM records—tickets, Warehouses, Branches &amp; Operational Hubs, users, assets, budgets, expenses, chats, and settings—save continuously to your permanent Cloud Firestore database in real time and automatically recover whenever the server restarts. Unlike Google Drive OAuth tokens (~60 min), this Cloud Web Database session persists indefinitely.
+                </p>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                {cloudDbStatus.connected ? (
+                  <>
+                    <button
+                      type="button"
+                      disabled={restoringCloudDb || !cloudDbStatus.cloudSnapshotDetected}
+                      onClick={() => setConfirmCloudRestoreModal(true)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/60 disabled:opacity-50 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Restore from Cloud DB
+                    </button>
+                    <button
+                      type="button"
+                      disabled={syncingCloudNow || cloudDbStatus.syncing}
+                      onClick={handleSyncCloudDbNow}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white disabled:opacity-60 cursor-pointer"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${syncingCloudNow || cloudDbStatus.syncing ? 'animate-spin' : ''}`} />
+                      {syncingCloudNow || cloudDbStatus.syncing ? 'Syncing Cloud DB...' : 'Sync Now to Cloud DB'}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={googleSigningIn}
+                    onClick={handleGoogleSignIn}
+                    className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white disabled:opacity-60 cursor-pointer"
+                  >
+                    <Cloud className="w-3.5 h-3.5" />
+                    {googleSigningIn ? 'Authorizing...' : 'Authorize Google & Activate Cloud DB'}
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50">
+                <div className="text-[11px] text-slate-500">Lifetime Cloud DB State</div>
+                <div className="mt-1 flex items-center gap-1.5 text-sm font-semibold">
+                  {cloudDbStatus.connected ? (
+                    <>
+                      <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                      <span className="text-emerald-700 dark:text-emerald-400">Active All Time</span>
+                    </>
+                  ) : (
+                    <>
+                      <Clock className="w-4 h-4 text-amber-500" />
+                      <span className="text-amber-700 dark:text-amber-400">Sign In Once to Activate</span>
+                    </>
+                  )}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5 truncate">
+                  {cloudDbStatus.email || 'No 60-min expiry once signed in'}
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50">
+                <div className="text-[11px] text-slate-500">Last Cloud Sync</div>
+                <div className="mt-1 text-sm font-mono font-semibold text-slate-900 dark:text-white">
+                  {formatDateTime(cloudDbStatus.lastSyncedAt || cloudDbStatus.cloudUpdatedAt)}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                  {cloudDbStatus.syncing ? 'Writing real-time updates…' : 'Real-time push active'}
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50">
+                <div className="text-[11px] text-slate-500">Cloud Stored Records</div>
+                <div className="mt-1 text-xl font-mono font-bold text-emerald-700 dark:text-emerald-400 tabular-nums">
+                  {cloudDbStatus.totalRecords || cloudDbStatus.cloudTotalRecords || 0}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5">
+                  Across all CRM tables
+                </div>
+              </div>
+
+              <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50">
+                <div className="text-[11px] text-slate-500">Auto-Recovery Protection</div>
+                <div className="mt-1 text-sm font-semibold text-slate-900 dark:text-white">
+                  {cloudDbStatus.cloudSnapshotDetected ? 'Ready on Boot' : 'Awaiting Initial Sync'}
+                </div>
+                <div className="text-[11px] font-mono text-slate-500 mt-0.5 truncate">
+                  {cloudDbStatus.projectId || 'Cloud Firestore'}
+                </div>
+              </div>
+            </div>
+
+            {cloudDbStatus.lastError && (
+              <div className="p-3 rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-xs text-red-700 dark:text-red-300">
+                <strong>Cloud DB Notice:</strong> {cloudDbStatus.lastError}
+              </div>
+            )}
+          </div>
+
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-5">
             <div className="flex flex-wrap items-start justify-between gap-4">
               <div className="space-y-1 max-w-2xl">
                 <div className="inline-flex items-center gap-2 text-xs font-semibold text-blue-700 dark:text-blue-400">
                   <FolderSync className="w-4 h-4" />
-                  <span>Database-Linked 1-Second Real-Time Google Drive Synchronization</span>
+                  <span>Google Drive Folder Backup &amp; 1-Second Mirror</span>
                 </div>
                 <h2 className="text-base font-display font-bold text-slate-900 dark:text-white">
                   Google Drive Database Sync Engine
                 </h2>
                 <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
-                  Every SQLite insert, update, and deletion across tickets, locations, assets, budgets, chats, and audit logs is tracked automatically by database triggers and synchronized in-place to your designated Google Drive folder every second without creating duplicate files.
+                  In addition to your permanent Cloud Web Database above, every change can also mirror in-place to your authorized Google Drive folder every 1 second when a Drive OAuth session is active.
                 </p>
               </div>
 
@@ -573,6 +830,15 @@ export default function IntegrationsView() {
                   <>
                     <button
                       type="button"
+                      disabled={restoringFromDrive}
+                      onClick={() => setConfirmRestoreModal(true)}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 hover:bg-emerald-100 dark:hover:bg-emerald-950/60 disabled:opacity-60 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Restore from Drive
+                    </button>
+                    <button
+                      type="button"
                       disabled={syncingDriveNow}
                       onClick={() => setConfirmManualSyncModal(true)}
                       className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-lg bg-blue-700 hover:bg-blue-800 text-white disabled:opacity-60 cursor-pointer"
@@ -592,6 +858,31 @@ export default function IntegrationsView() {
                 )}
               </div>
             </div>
+
+            {driveStatus?.remoteRecoveryAvailable && (
+              <div className="p-4 rounded-xl border border-amber-300 dark:border-amber-700 bg-amber-50 dark:bg-amber-950/40 flex flex-wrap items-center justify-between gap-4">
+                <div className="space-y-1 max-w-2xl">
+                  <div className="flex items-center gap-2 text-xs font-bold text-amber-900 dark:text-amber-200">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                    <span>Saved Database Detected in Google Drive (Auto-Overwrite Blocked)</span>
+                  </div>
+                  <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                    This server restarted with a fresh local database, and your existing saved database{' '}
+                    <span className="font-mono font-semibold">{driveStatus.remoteRecoveryAvailable.fileName}</span> (
+                    {formatBytesCompact(driveStatus.remoteRecoveryAvailable.sizeBytes)}) is stored safely in Google Drive.
+                    Restore it now to recover all tickets, users, locations, assets, and chats and resume 1-second autosync.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setConfirmRestoreModal(true)}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-700 text-white cursor-pointer shrink-0"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  Restore Database from Drive
+                </button>
+              </div>
+            )}
 
             {/* Live Telemetry Strip */}
             <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -623,6 +914,9 @@ export default function IntegrationsView() {
                   {driveStatus?.connectedAccount?.email ||
                     driveStatus?.config.connected_google_email ||
                     'Not authenticated'}
+                  {driveStatus?.tokenActive && getGoogleTokenRemainingMinutes() !== null
+                    ? ` · ~${getGoogleTokenRemainingMinutes()}m session`
+                    : ''}
                 </div>
               </div>
 
@@ -741,6 +1035,15 @@ export default function IntegrationsView() {
                 <strong>Sync Notice:</strong> {driveStatus.config.last_error}
               </div>
             )}
+
+            <div className="p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 text-xs text-slate-600 dark:text-slate-300 space-y-1">
+              <div className="font-semibold text-slate-900 dark:text-white">
+                Lifetime Cloud Web Database + Google Drive Folder Backup
+              </div>
+              <p className="leading-relaxed">
+                Google Drive OAuth access tokens expire after ~60 minutes per browser authorization, whereas your <strong>Lifetime Cloud Web Database (Cloud Firestore)</strong> stays authenticated indefinitely and auto-restores all CRM data on every restart so you never lose work or see a fresh empty portal. Re-authorize Google Drive above anytime you want fresh <span className="font-mono font-semibold">sdglobal-crm-live.db</span> snapshots written to your Drive folder.
+              </p>
+            </div>
 
             {/* Target Folder Configuration Form */}
             <form
@@ -995,8 +1298,13 @@ export default function IntegrationsView() {
               <button
                 type="button"
                 onClick={async () => {
-                  const res = await updateNotificationPrefs({ enabled: !notificationPrefs.enabled });
-                  setMsg(`Super Admin notifications turned ${res.enabled ? 'ON' : 'OFF'}.`);
+                  setErr('');
+                  try {
+                    const res = await updateNotificationPrefs({ enabled: !notificationPrefs.enabled });
+                    setMsg(`Super Admin notifications turned ${res.enabled ? 'ON' : 'OFF'}.`);
+                  } catch (e: any) {
+                    setErr(e?.message || 'Failed to update notification preferences.');
+                  }
                 }}
                 className={`px-4 py-2 text-xs font-semibold rounded-lg cursor-pointer shrink-0 ${
                   notificationPrefs.enabled
@@ -1021,8 +1329,13 @@ export default function IntegrationsView() {
                 type="button"
                 disabled={!notificationPrefs.enabled}
                 onClick={async () => {
-                  const res = await updateNotificationPrefs({ popups_enabled: !notificationPrefs.popups_enabled });
-                  setMsg(`Live popup alerts turned ${res.popups_enabled ? 'ON' : 'OFF'}.`);
+                  setErr('');
+                  try {
+                    const res = await updateNotificationPrefs({ popups_enabled: !notificationPrefs.popups_enabled });
+                    setMsg(`Live popup alerts turned ${res.popups_enabled ? 'ON' : 'OFF'}.`);
+                  } catch (e: any) {
+                    setErr(e?.message || 'Failed to update live popup preferences.');
+                  }
                 }}
                 className={`px-4 py-2 text-xs font-semibold rounded-lg cursor-pointer shrink-0 disabled:opacity-40 ${
                   notificationPrefs.popups_enabled && notificationPrefs.enabled
@@ -1543,6 +1856,92 @@ export default function IntegrationsView() {
                 className="px-4 py-2 text-xs font-semibold rounded-lg bg-red-600 hover:bg-red-700 text-white disabled:opacity-60 cursor-pointer"
               >
                 {deletingDriveFile ? 'Deleting...' : 'Confirm Delete'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal 4: Restore Live Database from Google Drive */}
+      {confirmRestoreModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <RotateCcw className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
+                  Restore Saved Database from Google Drive?
+                </h4>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1.5 leading-relaxed">
+                  This will download <span className="font-mono font-semibold">sdglobal-crm-live.db</span> from your Google Drive folder, verify SQLite integrity, replace the current local database (after taking a local safety snapshot), and resume 1-second continuous autosync.
+                </p>
+                {driveStatus?.remoteRecoveryAvailable && (
+                  <div className="mt-2 p-2.5 rounded-lg bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 text-[11px] font-mono space-y-0.5">
+                    <div>File: {driveStatus.remoteRecoveryAvailable.fileName}</div>
+                    <div>Size: {formatBytesCompact(driveStatus.remoteRecoveryAvailable.sizeBytes)}</div>
+                    <div>
+                      Last Modified:{' '}
+                      {driveStatus.remoteRecoveryAvailable.modifiedTime
+                        ? formatDateTime(driveStatus.remoteRecoveryAvailable.modifiedTime)
+                        : 'Latest on Drive'}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={restoringFromDrive}
+                onClick={() => setConfirmRestoreModal(false)}
+                className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+                <button
+                  type="button"
+                  disabled={restoringFromDrive}
+                  onClick={handleConfirmRestoreFromDrive}
+                  className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 cursor-pointer"
+                >
+                  {restoringFromDrive ? 'Restoring Database...' : 'Restore & Resume 1s Sync'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+      {/* Confirmation Modal 5: Restore from Lifetime Cloud Database */}
+      {confirmCloudRestoreModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <Database className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+              <div>
+                <h4 className="text-sm font-display font-semibold text-slate-900 dark:text-white">
+                  Restore CRM Data from Lifetime Cloud Database?
+                </h4>
+                <p className="text-xs text-slate-600 dark:text-slate-300 mt-1.5 leading-relaxed">
+                  This will restore all {cloudDbStatus.cloudTotalRecords || cloudDbStatus.totalRecords} saved records from your persistent Cloud Firestore database into the live workspace after taking a local safety backup.
+                </p>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={restoringCloudDb}
+                onClick={() => setConfirmCloudRestoreModal(false)}
+                className="px-4 py-2 text-xs font-medium rounded-lg border border-slate-300 dark:border-slate-700 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={restoringCloudDb}
+                onClick={handleConfirmRestoreFromCloudDb}
+                className="px-4 py-2 text-xs font-semibold rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-60 cursor-pointer"
+              >
+                {restoringCloudDb ? 'Restoring...' : 'Confirm Restore'}
               </button>
             </div>
           </div>

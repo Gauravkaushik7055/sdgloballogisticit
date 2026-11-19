@@ -79,6 +79,7 @@ export default function AdminDashboard({
   const [priority, setPriority] = useState('All');
   const [status, setStatus] = useState('All');
   const [queueFocus, setQueueFocus] = useState<'all' | 'pending_assigns' | 'pending_work'>('all');
+  const [errorMsg, setErrorMsg] = useState('');
 
   const loadAnalytics = useCallback(async () => {
     const qs = new URLSearchParams();
@@ -91,22 +92,27 @@ export default function AdminDashboard({
     if (priority !== 'All') qs.set('priority', priority);
     if (status !== 'All') qs.set('status', status);
 
-    const [analyticsRes, ticketsRes] = await Promise.all([
-      apiFetch<any>(`/api/analytics/dashboard?${qs.toString()}`),
-      apiFetch<{ tickets: TicketItem[] }>(`/api/tickets?${qs.toString()}`),
-    ]);
-    setData(analyticsRes);
-    const filteredList =
-      queueFocus === 'pending_assigns'
-        ? ticketsRes.tickets.filter(
-            (t) => !t.assigned_moderator_id && !['Completed', 'Resolved', 'Closed'].includes(t.status)
-          )
-        : queueFocus === 'pending_work'
-        ? ticketsRes.tickets.filter(
-            (t) => Boolean(t.assigned_moderator_id) && !['Completed', 'Resolved', 'Closed'].includes(t.status)
-          )
-        : ticketsRes.tickets;
-    setRecentTickets(filteredList.slice(0, 10));
+    try {
+      const [analyticsRes, ticketsRes] = await Promise.all([
+        apiFetch<any>(`/api/analytics/dashboard?${qs.toString()}`),
+        apiFetch<{ tickets: TicketItem[] }>(`/api/tickets?${qs.toString()}`),
+      ]);
+      setData(analyticsRes);
+      const filteredList =
+        queueFocus === 'pending_assigns'
+          ? ticketsRes.tickets.filter(
+              (t) => !t.assigned_moderator_id && !['Completed', 'Resolved', 'Closed'].includes(t.status)
+            )
+          : queueFocus === 'pending_work'
+          ? ticketsRes.tickets.filter(
+              (t) => Boolean(t.assigned_moderator_id) && !['Completed', 'Resolved', 'Closed'].includes(t.status)
+            )
+          : ticketsRes.tickets;
+      setRecentTickets(filteredList.slice(0, 10));
+      setErrorMsg('');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Unable to load dashboard analytics.');
+    }
   }, [dateFrom, dateTo, locationId, departmentId, moderatorId, category, priority, status, queueFocus]);
 
   const loadSuperAdminWidgets = useCallback(async () => {
@@ -250,6 +256,14 @@ export default function AdminDashboard({
 
   return (
     <div className="space-y-6">
+      {errorMsg && (
+        <div className="px-4 py-2.5 text-xs rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 flex items-center justify-between gap-2">
+          <span>{errorMsg}</span>
+          <button type="button" onClick={() => setErrorMsg('')} className="font-semibold hover:underline cursor-pointer">
+            Dismiss
+          </button>
+        </div>
+      )}
       {readOnlyExecutive && (
         <div className="px-4 py-3 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs text-slate-600 dark:text-slate-300 flex items-center justify-between">
           <span>

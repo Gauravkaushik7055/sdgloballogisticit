@@ -25,7 +25,7 @@ import {
 import { useAuth } from '../context/AuthContext.tsx';
 import { useTheme } from '../context/ThemeContext.tsx';
 import { BroadcastCategory } from '../types/index.ts';
-import { apiFetch, formatDateTime } from '../utils/api.ts';
+import { apiFetch, formatDateTime, setAuthToken } from '../utils/api.ts';
 import BroadcastAttachmentLink from './broadcasts/BroadcastAttachmentLink.tsx';
 import SdGlobalLogo from './SdGlobalLogo.tsx';
 
@@ -125,8 +125,8 @@ export default function Layout({
       setMfaCodeInput('');
       setMfaDisablePassword('');
       if (user.role === 'super_admin' || user.role === 'management') {
-        apiFetch<{ enabled: boolean }>('/api/auth/mfa/status')
-          .then((res) => setMfaEnabled(Boolean(res.enabled)))
+        apiFetch<{ mfa_enabled?: boolean; enabled?: boolean }>('/api/auth/mfa/status')
+          .then((res) => setMfaEnabled(Boolean(res.mfa_enabled ?? res.enabled)))
           .catch(() => setMfaEnabled(Boolean(user.mfa_enabled)));
       }
     }
@@ -284,7 +284,7 @@ export default function Layout({
         }),
       });
       if (res.token) {
-        sessionStorage.setItem('logicore_jwt', res.token);
+        setAuthToken(res.token);
       }
       await refreshUser();
       setProfileMsg(res.message || 'Account profile updated successfully.');

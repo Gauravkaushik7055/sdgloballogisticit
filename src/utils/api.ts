@@ -1,11 +1,35 @@
-let authToken: string | null = sessionStorage.getItem('logicore_jwt');
+const JWT_STORAGE_KEY = 'logicore_jwt';
+
+function readInitialToken(): string | null {
+  try {
+    const persistent = localStorage.getItem(JWT_STORAGE_KEY);
+    if (persistent) return persistent;
+    const legacy = sessionStorage.getItem(JWT_STORAGE_KEY);
+    if (legacy) {
+      localStorage.setItem(JWT_STORAGE_KEY, legacy);
+      sessionStorage.removeItem(JWT_STORAGE_KEY);
+      return legacy;
+    }
+  } catch {
+    // ignore storage access restrictions
+  }
+  return null;
+}
+
+let authToken: string | null = readInitialToken();
 
 export function setAuthToken(token: string | null) {
   authToken = token;
-  if (token) {
-    sessionStorage.setItem('logicore_jwt', token);
-  } else {
-    sessionStorage.removeItem('logicore_jwt');
+  try {
+    if (token) {
+      localStorage.setItem(JWT_STORAGE_KEY, token);
+      sessionStorage.removeItem(JWT_STORAGE_KEY);
+    } else {
+      localStorage.removeItem(JWT_STORAGE_KEY);
+      sessionStorage.removeItem(JWT_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage access restrictions
   }
 }
 
@@ -44,7 +68,9 @@ export async function apiFetch<T = any>(url: string, options: RequestInit = {}):
         })
       );
     }
-    throw new Error(data?.error || `Request failed (${res.status})`);
+    const err = new Error(data?.error || `Request failed (${res.status})`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
   return data as T;
 }

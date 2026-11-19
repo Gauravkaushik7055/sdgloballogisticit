@@ -1,0 +1,777 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reusable hardened global primitives
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedAdmin() {
+      return isSignedIn() && request.auth.token.email == 'a88593347@gmail.com';
+    }
+
+    function isAdmin() {
+      return isBootstrappedAdmin() || (
+        isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    function isOwnerOnCreate(data) {
+      return isValidId(data.ownerUid) && data.ownerUid == request.auth.uid;
+    }
+
+    function hasImmutableCreateTimestamps(data) {
+      return data.createdAt == request.time && data.updatedAt == request.time;
+    }
+
+    function hasImmutableUpdateTimestamps() {
+      return incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().ownerUid == existing().ownerUid;
+    }
+
+    function isValidAdmin(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt'])
+        && isValidId(data.uid)
+        && data.email is string && data.email.size() <= 200
+        && data.displayName is string && data.displayName.size() <= 200
+        && data.role == 'admin';
+    }
+
+    function isValidCrmMeta(data) {
+      return data.keys().hasAll([
+          'metaKey', 'lastSeq', 'totalRecords', 'driveFolderUrl', 'driveFolderId',
+          'recordCounts', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'metaKey', 'lastSeq', 'totalRecords', 'driveFolderUrl', 'driveFolderId',
+          'recordCounts', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && isValidId(data.metaKey)
+        && data.lastSeq is number
+        && data.totalRecords is number
+        && data.driveFolderUrl is string && data.driveFolderUrl.size() <= 500
+        && isValidId(data.driveFolderId)
+        && data.recordCounts is map;
+    }
+
+    function isValidLocation(data) {
+      return data.keys().hasAll([
+          'idNum', 'code', 'name', 'type', 'city', 'state', 'address',
+          'managerName', 'recordCreatedAt', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'code', 'name', 'type', 'city', 'state', 'address',
+          'managerName', 'recordCreatedAt', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.code is string && data.code.size() <= 64
+        && data.name is string && data.name.size() <= 200
+        && data.type is string && data.type.size() <= 100
+        && data.city is string && data.city.size() <= 120
+        && data.state is string && data.state.size() <= 120
+        && data.address is string && data.address.size() <= 500
+        && data.managerName is string && data.managerName.size() <= 200
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidDepartment(data) {
+      return data.keys().hasAll(['idNum', 'name', 'code', 'costCenter', 'ownerUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['idNum', 'name', 'code', 'costCenter', 'ownerUid', 'createdAt', 'updatedAt'])
+        && data.idNum is number
+        && data.name is string && data.name.size() <= 200
+        && data.code is string && data.code.size() <= 64
+        && data.costCenter is string && data.costCenter.size() <= 120;
+    }
+
+    function isValidCrmUser(data) {
+      return data.keys().hasAll([
+          'idNum', 'roleId', 'email', 'passwordHash', 'fullName', 'status',
+          'mustResetPassword', 'mobile', 'lastLoginAt', 'lastLoginIp',
+          'recordCreatedAt', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'roleId', 'email', 'passwordHash', 'fullName', 'status',
+          'mustResetPassword', 'mobile', 'lastLoginAt', 'lastLoginIp',
+          'recordCreatedAt', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.roleId is number
+        && data.email is string && data.email.size() <= 200
+        && data.passwordHash is string && data.passwordHash.size() <= 256
+        && data.fullName is string && data.fullName.size() <= 200
+        && data.status in ['Active', 'Inactive']
+        && data.mustResetPassword is number
+        && data.mobile is string && data.mobile.size() <= 40
+        && data.lastLoginAt is string && data.lastLoginAt.size() <= 64
+        && data.lastLoginIp is string && data.lastLoginIp.size() <= 100
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidEmployee(data) {
+      return data.keys().hasAll([
+          'idNum', 'userId', 'employeeCode', 'fullName', 'departmentId',
+          'designation', 'mobile', 'email', 'locationId', 'reportingManager',
+          'loginCount', 'lastLoginAt', 'lastLoginIp', 'recordCreatedAt',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'userId', 'employeeCode', 'fullName', 'departmentId',
+          'designation', 'mobile', 'email', 'locationId', 'reportingManager',
+          'loginCount', 'lastLoginAt', 'lastLoginIp', 'recordCreatedAt',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.userId is number
+        && data.employeeCode is string && data.employeeCode.size() <= 64
+        && data.fullName is string && data.fullName.size() <= 200
+        && data.departmentId is number
+        && data.designation is string && data.designation.size() <= 200
+        && data.mobile is string && data.mobile.size() <= 40
+        && data.email is string && data.email.size() <= 200
+        && data.locationId is number
+        && data.reportingManager is string && data.reportingManager.size() <= 200
+        && data.loginCount is number
+        && data.lastLoginAt is string && data.lastLoginAt.size() <= 64
+        && data.lastLoginIp is string && data.lastLoginIp.size() <= 100
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidModerator(data) {
+      return data.keys().hasAll([
+          'idNum', 'userId', 'employeeCode', 'fullName', 'email', 'phone',
+          'specialization', 'assignedLocationIds', 'dateOfJoining', 'status',
+          'performanceRating', 'maxCapacity', 'recordCreatedAt', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'userId', 'employeeCode', 'fullName', 'email', 'phone',
+          'specialization', 'assignedLocationIds', 'dateOfJoining', 'status',
+          'performanceRating', 'maxCapacity', 'recordCreatedAt', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.userId is number
+        && data.employeeCode is string && data.employeeCode.size() <= 64
+        && data.fullName is string && data.fullName.size() <= 200
+        && data.email is string && data.email.size() <= 200
+        && data.phone is string && data.phone.size() <= 40
+        && data.specialization is string && data.specialization.size() <= 200
+        && data.assignedLocationIds is list && data.assignedLocationIds.size() <= 100
+        && (data.assignedLocationIds.size() == 0 || data.assignedLocationIds[0] is number)
+        && data.dateOfJoining is string && data.dateOfJoining.size() <= 64
+        && data.status in ['Active', 'Inactive']
+        && data.performanceRating is number
+        && data.maxCapacity is number
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidTicket(data) {
+      return data.keys().hasAll([
+          'idNum', 'ticketNumber', 'status', 'priority', 'locationId',
+          'departmentId', 'category', 'deviceName', 'description',
+          'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'ticketNumber', 'status', 'priority', 'locationId',
+          'departmentId', 'category', 'deviceName', 'description',
+          'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.ticketNumber is string && data.ticketNumber.size() <= 64
+        && data.status is string && data.status.size() <= 64
+        && data.priority in ['Critical', 'High', 'Medium', 'Low']
+        && data.locationId is number
+        && data.departmentId is number
+        && data.category is string && data.category.size() <= 120
+        && data.deviceName is string && data.deviceName.size() <= 200
+        && data.description is string && data.description.size() <= 5000
+        && data.payload is map;
+    }
+
+    function isValidAsset(data) {
+      return data.keys().hasAll([
+          'idNum', 'assetTag', 'serialNumber', 'category', 'brand', 'model',
+          'conditionStatus', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'assetTag', 'serialNumber', 'category', 'brand', 'model',
+          'conditionStatus', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.assetTag is string && data.assetTag.size() <= 120
+        && data.serialNumber is string && data.serialNumber.size() <= 120
+        && data.category is string && data.category.size() <= 120
+        && data.brand is string && data.brand.size() <= 120
+        && data.model is string && data.model.size() <= 120
+        && data.conditionStatus is string && data.conditionStatus.size() <= 64
+        && data.payload is map;
+    }
+
+    function isValidBudget(data) {
+      return data.keys().hasAll([
+          'idNum', 'fiscalYear', 'month', 'locationId', 'category',
+          'allocatedAmount', 'notes', 'createdByUserId', 'recordCreatedAt',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'fiscalYear', 'month', 'locationId', 'category',
+          'allocatedAmount', 'notes', 'createdByUserId', 'recordCreatedAt',
+          'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.fiscalYear is number
+        && data.month is number
+        && data.locationId is number
+        && data.category is string && data.category.size() <= 120
+        && data.allocatedAmount is number
+        && data.notes is string && data.notes.size() <= 1000
+        && data.createdByUserId is number
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidExpense(data) {
+      return data.keys().hasAll([
+          'idNum', 'category', 'vendorName', 'amount', 'invoiceNumber',
+          'approvalStatus', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'category', 'vendorName', 'amount', 'invoiceNumber',
+          'approvalStatus', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.category is string && data.category.size() <= 120
+        && data.vendorName is string && data.vendorName.size() <= 200
+        && data.amount is number
+        && data.invoiceNumber is string && data.invoiceNumber.size() <= 120
+        && data.approvalStatus in ['Pending', 'Approved', 'Rejected']
+        && data.payload is map;
+    }
+
+    function isValidVendor(data) {
+      return data.keys().hasAll([
+          'idNum', 'name', 'category', 'contactPerson', 'phone', 'email',
+          'taxId', 'address', 'recordCreatedAt', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'name', 'category', 'contactPerson', 'phone', 'email',
+          'taxId', 'address', 'recordCreatedAt', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.name is string && data.name.size() <= 200
+        && data.category is string && data.category.size() <= 120
+        && data.contactPerson is string && data.contactPerson.size() <= 200
+        && data.phone is string && data.phone.size() <= 40
+        && data.email is string && data.email.size() <= 200
+        && data.taxId is string && data.taxId.size() <= 100
+        && data.address is string && data.address.size() <= 500
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidDirectMessage(data) {
+      return data.keys().hasAll([
+          'idNum', 'senderUserId', 'recipientUserId', 'ticketId', 'message',
+          'isRead', 'readAt', 'conversationScope', 'isFlaggedPrivate', 'isArchived',
+          'archivedAt', 'archivedByUserId', 'recordCreatedAt', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'senderUserId', 'recipientUserId', 'ticketId', 'message',
+          'isRead', 'readAt', 'conversationScope', 'isFlaggedPrivate', 'isArchived',
+          'archivedAt', 'archivedByUserId', 'recordCreatedAt', 'ownerUid',
+          'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.senderUserId is number
+        && data.recipientUserId is number
+        && data.ticketId is number
+        && data.message is string && data.message.size() <= 5000
+        && data.isRead is number
+        && data.readAt is string && data.readAt.size() <= 64
+        && data.conversationScope is string && data.conversationScope.size() <= 64
+        && data.isFlaggedPrivate is number
+        && data.isArchived is number
+        && data.archivedAt is string && data.archivedAt.size() <= 64
+        && data.archivedByUserId is number
+        && data.recordCreatedAt is string && data.recordCreatedAt.size() <= 64;
+    }
+
+    function isValidBroadcast(data) {
+      return data.keys().hasAll([
+          'idNum', 'title', 'message', 'category', 'displayMode',
+          'targetAudience', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'title', 'message', 'category', 'displayMode',
+          'targetAudience', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.title is string && data.title.size() <= 300
+        && data.message is string && data.message.size() <= 5000
+        && data.category is string && data.category.size() <= 64
+        && data.displayMode is string && data.displayMode.size() <= 64
+        && data.targetAudience is string && data.targetAudience.size() <= 64
+        && data.payload is map;
+    }
+
+    function isValidDropdownOption(data) {
+      return data.keys().hasAll([
+          'idNum', 'groupKey', 'label', 'value', 'sortOrder', 'isActive',
+          'isSystem', 'meta', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'groupKey', 'label', 'value', 'sortOrder', 'isActive',
+          'isSystem', 'meta', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.groupKey is string && data.groupKey.size() <= 100
+        && data.label is string && data.label.size() <= 200
+        && data.value is string && data.value.size() <= 200
+        && data.sortOrder is number
+        && data.isActive is number
+        && data.isSystem is number
+        && data.meta is map;
+    }
+
+    function isValidSlaConfig(data) {
+      return data.keys().hasAll([
+          'idNum', 'priority', 'firstResponseMinutes', 'resolutionHours',
+          'workingHoursStart', 'workingHoursEnd', 'holidays', 'autoEscalate',
+          'escalateToEmail', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'priority', 'firstResponseMinutes', 'resolutionHours',
+          'workingHoursStart', 'workingHoursEnd', 'holidays', 'autoEscalate',
+          'escalateToEmail', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.priority in ['Critical', 'High', 'Medium', 'Low']
+        && data.firstResponseMinutes is number
+        && data.resolutionHours is number
+        && data.workingHoursStart is string && data.workingHoursStart.size() <= 16
+        && data.workingHoursEnd is string && data.workingHoursEnd.size() <= 16
+        && data.holidays is list && data.holidays.size() <= 100
+        && (data.holidays.size() == 0 || data.holidays[0] is string)
+        && data.autoEscalate is number
+        && data.escalateToEmail is string && data.escalateToEmail.size() <= 200;
+    }
+
+    function isValidSavedReport(data) {
+      return data.keys().hasAll([
+          'idNum', 'reportType', 'title', 'rowCount', 'createdByName',
+          'createdByRole', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'idNum', 'reportType', 'title', 'rowCount', 'createdByName',
+          'createdByRole', 'payload', 'ownerUid', 'createdAt', 'updatedAt'
+        ])
+        && data.idNum is number
+        && data.reportType is string && data.reportType.size() <= 120
+        && data.title is string && data.title.size() <= 300
+        && data.rowCount is number
+        && data.createdByName is string && data.createdByName.size() <= 200
+        && data.createdByRole is string && data.createdByRole.size() <= 64
+        && data.payload is map;
+    }
+
+    function isValidCrmRecord(data) {
+      return data.keys().hasAll(['tableName', 'sourceKey', 'dataMap', 'ownerUid', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['tableName', 'sourceKey', 'dataMap', 'ownerUid', 'createdAt', 'updatedAt'])
+        && data.tableName is string && data.tableName.size() <= 80 && data.tableName.matches('^[a-zA-Z0-9_]+$')
+        && isValidId(data.sourceKey)
+        && data.dataMap is map;
+    }
+
+    // 1. Admin Registry
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isAdmin() || (isSignedIn() && request.auth.uid == adminId));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.uid == request.auth.uid);
+      allow create: if isValidId(adminId)
+        && isAdmin()
+        && isValidAdmin(incoming())
+        && incoming().uid == adminId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(adminId)
+        && isAdmin()
+        && isValidAdmin(incoming())
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['email', 'displayName', 'role', 'updatedAt']);
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    // 2. Startup connection check
+    match /test/{docId} {
+      allow get: if isValidId(docId) && isSignedIn() && docId == 'connection';
+      allow list, create, update, delete: if false;
+    }
+
+    // 3. CRM Sync Metadata
+    match /crm_meta/{metaId} {
+      allow get: if isValidId(metaId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(metaId)
+        && isSignedIn()
+        && isOwnerOnCreate(incoming())
+        && isValidCrmMeta(incoming())
+        && hasImmutableCreateTimestamps(incoming())
+        && isAdmin();
+      allow update: if isValidId(metaId)
+        && isSignedIn()
+        && isValidCrmMeta(incoming())
+        && hasImmutableUpdateTimestamps()
+        && (isAdmin() || (
+          existing().ownerUid == request.auth.uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'lastSeq', 'totalRecords', 'driveFolderUrl', 'driveFolderId', 'recordCounts', 'updatedAt'
+          ])
+        ));
+      allow delete: if isValidId(metaId) && isAdmin();
+    }
+
+    // 4. Locations (Warehouses, Branches, Corporate Offices, Operational Hubs)
+    match /locations/{locationId} {
+      allow get: if isValidId(locationId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(locationId)
+        && isSignedIn()
+        && isOwnerOnCreate(incoming())
+        && isValidLocation(incoming())
+        && hasImmutableCreateTimestamps(incoming())
+        && isAdmin();
+      allow update: if isValidId(locationId)
+        && isSignedIn()
+        && isValidLocation(incoming())
+        && hasImmutableUpdateTimestamps()
+        && (isAdmin() || (
+          existing().ownerUid == request.auth.uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'code', 'name', 'type', 'city', 'state', 'address', 'managerName', 'updatedAt'
+          ])
+        ));
+      allow delete: if isValidId(locationId) && isAdmin();
+    }
+
+    // 5. Departments
+    match /departments/{departmentId} {
+      allow get: if isValidId(departmentId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(departmentId)
+        && isSignedIn()
+        && isOwnerOnCreate(incoming())
+        && isValidDepartment(incoming())
+        && hasImmutableCreateTimestamps(incoming())
+        && isAdmin();
+      allow update: if isValidId(departmentId)
+        && isSignedIn()
+        && isValidDepartment(incoming())
+        && hasImmutableUpdateTimestamps()
+        && (isAdmin() || (
+          existing().ownerUid == request.auth.uid
+          && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'code', 'costCenter', 'updatedAt'])
+        ));
+      allow delete: if isValidId(departmentId) && isAdmin();
+    }
+
+    // 6. CRM Users (PII strict admin-only)
+    match /crm_users/{userId} {
+      allow get: if isValidId(userId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(userId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidCrmUser(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(userId)
+        && isAdmin()
+        && isValidCrmUser(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'roleId', 'email', 'passwordHash', 'fullName', 'status',
+          'mustResetPassword', 'mobile', 'lastLoginAt', 'lastLoginIp', 'updatedAt'
+        ]);
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // 7. Employees (PII strict admin-only)
+    match /employees/{employeeId} {
+      allow get: if isValidId(employeeId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(employeeId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidEmployee(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(employeeId)
+        && isAdmin()
+        && isValidEmployee(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'userId', 'employeeCode', 'fullName', 'departmentId', 'designation',
+          'mobile', 'email', 'locationId', 'reportingManager', 'loginCount',
+          'lastLoginAt', 'lastLoginIp', 'updatedAt'
+        ]);
+      allow delete: if isValidId(employeeId) && isAdmin();
+    }
+
+    // 8. Moderators (PII strict admin-only)
+    match /moderators/{moderatorId} {
+      allow get: if isValidId(moderatorId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(moderatorId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidModerator(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(moderatorId)
+        && isAdmin()
+        && isValidModerator(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'userId', 'employeeCode', 'fullName', 'email', 'phone', 'specialization',
+          'assignedLocationIds', 'dateOfJoining', 'status', 'performanceRating',
+          'maxCapacity', 'updatedAt'
+        ]);
+      allow delete: if isValidId(moderatorId) && isAdmin();
+    }
+
+    // 9. Support Tickets (with terminal state locking + admin override)
+    match /tickets/{ticketId} {
+      allow get: if isValidId(ticketId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(ticketId)
+        && isSignedIn()
+        && isOwnerOnCreate(incoming())
+        && isValidTicket(incoming())
+        && hasImmutableCreateTimestamps(incoming())
+        && isAdmin();
+      allow update: if isValidId(ticketId)
+        && isSignedIn()
+        && isValidTicket(incoming())
+        && hasImmutableUpdateTimestamps()
+        && (isAdmin() || (
+          existing().ownerUid == request.auth.uid
+          && !(existing().status in ['Completed', 'Closed'])
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'status', 'priority', 'locationId', 'departmentId', 'category',
+            'deviceName', 'description', 'payload', 'updatedAt'
+          ])
+        ));
+      allow delete: if isValidId(ticketId) && isAdmin();
+    }
+
+    // 10. IT Assets
+    match /assets/{assetId} {
+      allow get: if isValidId(assetId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(assetId)
+        && isSignedIn()
+        && isOwnerOnCreate(incoming())
+        && isValidAsset(incoming())
+        && hasImmutableCreateTimestamps(incoming())
+        && isAdmin();
+      allow update: if isValidId(assetId)
+        && isSignedIn()
+        && isValidAsset(incoming())
+        && hasImmutableUpdateTimestamps()
+        && (isAdmin() || (
+          existing().ownerUid == request.auth.uid
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'assetTag', 'serialNumber', 'category', 'brand', 'model',
+            'conditionStatus', 'payload', 'updatedAt'
+          ])
+        ));
+      allow delete: if isValidId(assetId) && isAdmin();
+    }
+
+    // 11. IT Budgets
+    match /budgets/{budgetId} {
+      allow get: if isValidId(budgetId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(budgetId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidBudget(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(budgetId)
+        && isAdmin()
+        && isValidBudget(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'fiscalYear', 'month', 'locationId', 'category', 'allocatedAmount', 'notes', 'updatedAt'
+        ]);
+      allow delete: if isValidId(budgetId) && isAdmin();
+    }
+
+    // 12. Expenses
+    match /expenses/{expenseId} {
+      allow get: if isValidId(expenseId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(expenseId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidExpense(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(expenseId)
+        && isAdmin()
+        && isValidExpense(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'category', 'vendorName', 'amount', 'invoiceNumber', 'approvalStatus', 'payload', 'updatedAt'
+        ]);
+      allow delete: if isValidId(expenseId) && isAdmin();
+    }
+
+    // 13. Vendors
+    match /vendors/{vendorId} {
+      allow get: if isValidId(vendorId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(vendorId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidVendor(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(vendorId)
+        && isAdmin()
+        && isValidVendor(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'name', 'category', 'contactPerson', 'phone', 'email', 'taxId', 'address', 'updatedAt'
+        ]);
+      allow delete: if isValidId(vendorId) && isAdmin();
+    }
+
+    // 14. Direct Messages
+    match /direct_messages/{messageId} {
+      allow get: if isValidId(messageId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(messageId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidDirectMessage(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(messageId)
+        && isAdmin()
+        && isValidDirectMessage(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'isRead', 'readAt', 'isArchived', 'archivedAt', 'archivedByUserId', 'updatedAt'
+        ]);
+      allow delete: if isValidId(messageId) && isAdmin();
+    }
+
+    // 15. Broadcast Notifications
+    match /broadcast_notifications/{broadcastId} {
+      allow get: if isValidId(broadcastId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(broadcastId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidBroadcast(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(broadcastId)
+        && isAdmin()
+        && isValidBroadcast(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'message', 'category', 'displayMode', 'targetAudience', 'payload', 'updatedAt'
+        ]);
+      allow delete: if isValidId(broadcastId) && isAdmin();
+    }
+
+    // 16. Dropdown Options (Warehouses, Branches, Operational Hubs, Categories)
+    match /dropdown_options/{optionId} {
+      allow get: if isValidId(optionId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(optionId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidDropdownOption(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(optionId)
+        && isAdmin()
+        && isValidDropdownOption(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'groupKey', 'label', 'value', 'sortOrder', 'isActive', 'isSystem', 'meta', 'updatedAt'
+        ]);
+      allow delete: if isValidId(optionId) && isAdmin();
+    }
+
+    // 17. SLA Configurations
+    match /sla_configurations/{slaId} {
+      allow get: if isValidId(slaId) && (isAdmin() || (isSignedIn() && existing().ownerUid == request.auth.uid));
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(slaId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidSlaConfig(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(slaId)
+        && isAdmin()
+        && isValidSlaConfig(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'firstResponseMinutes', 'resolutionHours', 'workingHoursStart',
+          'workingHoursEnd', 'holidays', 'autoEscalate', 'escalateToEmail', 'updatedAt'
+        ]);
+      allow delete: if isValidId(slaId) && isAdmin();
+    }
+
+    // 18. Saved Reports
+    match /saved_reports/{reportId} {
+      allow get: if isValidId(reportId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(reportId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidSavedReport(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(reportId)
+        && isAdmin()
+        && isValidSavedReport(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly([
+          'title', 'rowCount', 'payload', 'updatedAt'
+        ]);
+      allow delete: if isValidId(reportId) && isAdmin();
+    }
+
+    // 19. Auxiliary CRM Records
+    match /crm_records/{recordId} {
+      allow get: if isValidId(recordId) && isAdmin();
+      allow list: if isBootstrappedAdmin() || (isSignedIn() && resource.data.ownerUid == request.auth.uid);
+      allow create: if isValidId(recordId)
+        && isAdmin()
+        && isOwnerOnCreate(incoming())
+        && isValidCrmRecord(incoming())
+        && hasImmutableCreateTimestamps(incoming());
+      allow update: if isValidId(recordId)
+        && isAdmin()
+        && isValidCrmRecord(incoming())
+        && hasImmutableUpdateTimestamps()
+        && incoming().diff(existing()).affectedKeys().hasOnly(['dataMap', 'updatedAt']);
+      allow delete: if isValidId(recordId) && isAdmin();
+    }
+  }
+}

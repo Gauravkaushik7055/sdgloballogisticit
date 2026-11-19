@@ -1,0 +1,440 @@
+{
+  "entities": {
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Authorized Cloud CRM administrator registry entry.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "maxLength": 200 },
+        "displayName": { "type": "string", "maxLength": 200 },
+        "role": { "type": "string", "enum": ["admin"], "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "displayName", "role", "createdAt", "updatedAt"]
+    },
+    "TestConnection": {
+      "title": "TestConnection",
+      "description": "Startup Firestore connection verification record.",
+      "type": "object",
+      "properties": {
+        "status": { "type": "string", "maxLength": 64 },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["status", "updatedAt"]
+    },
+    "CrmMeta": {
+      "title": "CrmMeta",
+      "description": "Cloud Firestore lifetime database synchronization state and record counts.",
+      "type": "object",
+      "properties": {
+        "metaKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "lastSeq": { "type": "number" },
+        "totalRecords": { "type": "number" },
+        "driveFolderUrl": { "type": "string", "maxLength": 500 },
+        "driveFolderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recordCounts": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["metaKey", "lastSeq", "totalRecords", "driveFolderUrl", "driveFolderId", "recordCounts", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Location": {
+      "title": "Location",
+      "description": "Warehouse, Branch, Corporate Office, or Operational Hub.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "code": { "type": "string", "maxLength": 64 },
+        "name": { "type": "string", "maxLength": 200 },
+        "type": { "type": "string", "maxLength": 100 },
+        "city": { "type": "string", "maxLength": 120 },
+        "state": { "type": "string", "maxLength": 120 },
+        "address": { "type": "string", "maxLength": 500 },
+        "managerName": { "type": "string", "maxLength": 200 },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "code", "name", "type", "city", "state", "address", "managerName", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Department": {
+      "title": "Department",
+      "description": "Organization department and cost center.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "name": { "type": "string", "maxLength": 200 },
+        "code": { "type": "string", "maxLength": 64 },
+        "costCenter": { "type": "string", "maxLength": 120 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "name", "code", "costCenter", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "CrmUser": {
+      "title": "CrmUser",
+      "description": "CRM user account record (PII protected to admins only).",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "roleId": { "type": "number" },
+        "email": { "type": "string", "maxLength": 200 },
+        "passwordHash": { "type": "string", "maxLength": 256 },
+        "fullName": { "type": "string", "maxLength": 200 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"], "maxLength": 32 },
+        "mustResetPassword": { "type": "number" },
+        "mobile": { "type": "string", "maxLength": 40 },
+        "lastLoginAt": { "type": "string", "maxLength": 64 },
+        "lastLoginIp": { "type": "string", "maxLength": 100 },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "roleId", "email", "passwordHash", "fullName", "status", "mustResetPassword", "mobile", "lastLoginAt", "lastLoginIp", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Employee": {
+      "title": "Employee",
+      "description": "Employee directory record (PII protected to admins only).",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "userId": { "type": "number" },
+        "employeeCode": { "type": "string", "maxLength": 64 },
+        "fullName": { "type": "string", "maxLength": 200 },
+        "departmentId": { "type": "number" },
+        "designation": { "type": "string", "maxLength": 200 },
+        "mobile": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 200 },
+        "locationId": { "type": "number" },
+        "reportingManager": { "type": "string", "maxLength": 200 },
+        "loginCount": { "type": "number" },
+        "lastLoginAt": { "type": "string", "maxLength": 64 },
+        "lastLoginIp": { "type": "string", "maxLength": 100 },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "userId", "employeeCode", "fullName", "departmentId", "designation", "mobile", "email", "locationId", "reportingManager", "loginCount", "lastLoginAt", "lastLoginIp", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Moderator": {
+      "title": "Moderator",
+      "description": "IT Support Moderator record (PII protected to admins only).",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "userId": { "type": "number" },
+        "employeeCode": { "type": "string", "maxLength": 64 },
+        "fullName": { "type": "string", "maxLength": 200 },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "specialization": { "type": "string", "maxLength": 200 },
+        "assignedLocationIds": { "type": "array" },
+        "dateOfJoining": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "enum": ["Active", "Inactive"], "maxLength": 32 },
+        "performanceRating": { "type": "number" },
+        "maxCapacity": { "type": "number" },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "userId", "employeeCode", "fullName", "email", "phone", "specialization", "assignedLocationIds", "dateOfJoining", "status", "performanceRating", "maxCapacity", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Ticket": {
+      "title": "Ticket",
+      "description": "IT Support incident or service request.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "ticketNumber": { "type": "string", "maxLength": 64 },
+        "status": { "type": "string", "maxLength": 64 },
+        "priority": { "type": "string", "enum": ["Critical", "High", "Medium", "Low"], "maxLength": 32 },
+        "locationId": { "type": "number" },
+        "departmentId": { "type": "number" },
+        "category": { "type": "string", "maxLength": 120 },
+        "deviceName": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "maxLength": 5000 },
+        "payload": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "ticketNumber", "status", "priority", "locationId", "departmentId", "category", "deviceName", "description", "payload", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Asset": {
+      "title": "Asset",
+      "description": "Enterprise IT Asset inventory item.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "assetTag": { "type": "string", "maxLength": 120 },
+        "serialNumber": { "type": "string", "maxLength": 120 },
+        "category": { "type": "string", "maxLength": 120 },
+        "brand": { "type": "string", "maxLength": 120 },
+        "model": { "type": "string", "maxLength": 120 },
+        "conditionStatus": { "type": "string", "maxLength": 64 },
+        "payload": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "assetTag", "serialNumber", "category", "brand", "model", "conditionStatus", "payload", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Budget": {
+      "title": "Budget",
+      "description": "IT Budget allocation record.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "fiscalYear": { "type": "number" },
+        "month": { "type": "number" },
+        "locationId": { "type": "number" },
+        "category": { "type": "string", "maxLength": 120 },
+        "allocatedAmount": { "type": "number" },
+        "notes": { "type": "string", "maxLength": 1000 },
+        "createdByUserId": { "type": "number" },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "fiscalYear", "month", "locationId", "category", "allocatedAmount", "notes", "createdByUserId", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Expense": {
+      "title": "Expense",
+      "description": "IT Expense and invoice approval record.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "category": { "type": "string", "maxLength": 120 },
+        "vendorName": { "type": "string", "maxLength": 200 },
+        "amount": { "type": "number" },
+        "invoiceNumber": { "type": "string", "maxLength": 120 },
+        "approvalStatus": { "type": "string", "enum": ["Pending", "Approved", "Rejected"], "maxLength": 32 },
+        "payload": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "category", "vendorName", "amount", "invoiceNumber", "approvalStatus", "payload", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "Vendor": {
+      "title": "Vendor",
+      "description": "IT Vendor directory record.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "name": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "maxLength": 120 },
+        "contactPerson": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 40 },
+        "email": { "type": "string", "maxLength": 200 },
+        "taxId": { "type": "string", "maxLength": 100 },
+        "address": { "type": "string", "maxLength": 500 },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "name", "category", "contactPerson", "phone", "email", "taxId", "address", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "DirectMessage": {
+      "title": "DirectMessage",
+      "description": "Direct and task-linked chat message.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "senderUserId": { "type": "number" },
+        "recipientUserId": { "type": "number" },
+        "ticketId": { "type": "number" },
+        "message": { "type": "string", "maxLength": 5000 },
+        "isRead": { "type": "number" },
+        "readAt": { "type": "string", "maxLength": 64 },
+        "conversationScope": { "type": "string", "maxLength": 64 },
+        "isFlaggedPrivate": { "type": "number" },
+        "isArchived": { "type": "number" },
+        "archivedAt": { "type": "string", "maxLength": 64 },
+        "archivedByUserId": { "type": "number" },
+        "recordCreatedAt": { "type": "string", "maxLength": 64 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "senderUserId", "recipientUserId", "ticketId", "message", "isRead", "readAt", "conversationScope", "isFlaggedPrivate", "isArchived", "archivedAt", "archivedByUserId", "recordCreatedAt", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "BroadcastNotification": {
+      "title": "BroadcastNotification",
+      "description": "Organization-wide or targeted announcement.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "title": { "type": "string", "maxLength": 300 },
+        "message": { "type": "string", "maxLength": 5000 },
+        "category": { "type": "string", "maxLength": 64 },
+        "displayMode": { "type": "string", "maxLength": 64 },
+        "targetAudience": { "type": "string", "maxLength": 64 },
+        "payload": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "title", "message", "category", "displayMode", "targetAudience", "payload", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "DropdownOption": {
+      "title": "DropdownOption",
+      "description": "Configurable dropdown option (including Warehouses, Branches & Operational Hubs).",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "groupKey": { "type": "string", "maxLength": 100 },
+        "label": { "type": "string", "maxLength": 200 },
+        "value": { "type": "string", "maxLength": 200 },
+        "sortOrder": { "type": "number" },
+        "isActive": { "type": "number" },
+        "isSystem": { "type": "number" },
+        "meta": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "groupKey", "label", "value", "sortOrder", "isActive", "isSystem", "meta", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "SlaConfiguration": {
+      "title": "SlaConfiguration",
+      "description": "SLA policy target by priority.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "priority": { "type": "string", "enum": ["Critical", "High", "Medium", "Low"], "maxLength": 32 },
+        "firstResponseMinutes": { "type": "number" },
+        "resolutionHours": { "type": "number" },
+        "workingHoursStart": { "type": "string", "maxLength": 16 },
+        "workingHoursEnd": { "type": "string", "maxLength": 16 },
+        "holidays": { "type": "array" },
+        "autoEscalate": { "type": "number" },
+        "escalateToEmail": { "type": "string", "maxLength": 200 },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "priority", "firstResponseMinutes", "resolutionHours", "workingHoursStart", "workingHoursEnd", "holidays", "autoEscalate", "escalateToEmail", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "SavedReport": {
+      "title": "SavedReport",
+      "description": "Saved operational or financial report snapshot.",
+      "type": "object",
+      "properties": {
+        "idNum": { "type": "number" },
+        "reportType": { "type": "string", "maxLength": 120 },
+        "title": { "type": "string", "maxLength": 300 },
+        "rowCount": { "type": "number" },
+        "createdByName": { "type": "string", "maxLength": 200 },
+        "createdByRole": { "type": "string", "maxLength": 64 },
+        "payload": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["idNum", "reportType", "title", "rowCount", "createdByName", "createdByRole", "payload", "ownerUid", "createdAt", "updatedAt"]
+    },
+    "CrmRecord": {
+      "title": "CrmRecord",
+      "description": "Auxiliary relational table row (ticket logs, asset maintenance, approvals, permissions, settings, audit logs).",
+      "type": "object",
+      "properties": {
+        "tableName": { "type": "string", "maxLength": 80, "pattern": "^[a-zA-Z0-9_]+$" },
+        "sourceKey": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "dataMap": { "type": "object" },
+        "ownerUid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["tableName", "sourceKey", "dataMap", "ownerUid", "createdAt", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Authorized Cloud CRM administrator registry."
+    },
+    "/test/{docId}": {
+      "schema": { "$ref": "#/entities/TestConnection" },
+      "description": "Startup Firestore connection check document."
+    },
+    "/crm_meta/{metaId}": {
+      "schema": { "$ref": "#/entities/CrmMeta" },
+      "description": "Lifetime database checkpoint and record summary."
+    },
+    "/locations/{locationId}": {
+      "schema": { "$ref": "#/entities/Location" },
+      "description": "Warehouses, Branches, Corporate Offices, and Operational Hubs."
+    },
+    "/departments/{departmentId}": {
+      "schema": { "$ref": "#/entities/Department" },
+      "description": "Company departments and cost centers."
+    },
+    "/crm_users/{userId}": {
+      "schema": { "$ref": "#/entities/CrmUser" },
+      "description": "CRM user accounts (admin-restricted PII)."
+    },
+    "/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/Employee" },
+      "description": "Employee directory records (admin-restricted PII)."
+    },
+    "/moderators/{moderatorId}": {
+      "schema": { "$ref": "#/entities/Moderator" },
+      "description": "Moderator engineer profiles (admin-restricted PII)."
+    },
+    "/tickets/{ticketId}": {
+      "schema": { "$ref": "#/entities/Ticket" },
+      "description": "Support tickets and workflow state."
+    },
+    "/assets/{assetId}": {
+      "schema": { "$ref": "#/entities/Asset" },
+      "description": "IT assets and hardware inventory."
+    },
+    "/budgets/{budgetId}": {
+      "schema": { "$ref": "#/entities/Budget" },
+      "description": "IT budgets by fiscal year, month, location, and category."
+    },
+    "/expenses/{expenseId}": {
+      "schema": { "$ref": "#/entities/Expense" },
+      "description": "IT expenses and vendor invoices."
+    },
+    "/vendors/{vendorId}": {
+      "schema": { "$ref": "#/entities/Vendor" },
+      "description": "IT vendors and service providers."
+    },
+    "/direct_messages/{messageId}": {
+      "schema": { "$ref": "#/entities/DirectMessage" },
+      "description": "Direct and task chat messages."
+    },
+    "/broadcast_notifications/{broadcastId}": {
+      "schema": { "$ref": "#/entities/BroadcastNotification" },
+      "description": "Broadcast notifications and announcements."
+    },
+    "/dropdown_options/{optionId}": {
+      "schema": { "$ref": "#/entities/DropdownOption" },
+      "description": "Dynamic dropdown options managed in Dropdown Manager."
+    },
+    "/sla_configurations/{slaId}": {
+      "schema": { "$ref": "#/entities/SlaConfiguration" },
+      "description": "SLA policy targets and escalation config."
+    },
+    "/saved_reports/{reportId}": {
+      "schema": { "$ref": "#/entities/SavedReport" },
+      "description": "Saved operational and financial reports."
+    },
+    "/crm_records/{recordId}": {
+      "schema": { "$ref": "#/entities/CrmRecord" },
+      "description": "Auxiliary operational records across related tables."
+    }
+  }
+}

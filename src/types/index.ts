@@ -157,6 +157,14 @@ export interface GoogleDriveSyncStatusResponse {
     canAddChildren: boolean;
     verifiedAt: string;
   } | null;
+  remoteRecoveryAvailable?: {
+    fileId: string;
+    fileName: string;
+    kind: 'sqlite' | 'json';
+    sizeBytes: number;
+    modifiedTime: string | null;
+    webViewLink?: string;
+  } | null;
   tokenActive: boolean;
   connectedAccount: { email?: string; displayName?: string; setAt?: string } | null;
   pendingChanges: number;

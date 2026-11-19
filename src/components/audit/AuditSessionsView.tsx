@@ -21,6 +21,7 @@ import {
 import { useAuth } from '../../context/AuthContext.tsx';
 import { AdminPermissionPolicy, GoogleDriveSyncStatusResponse, RetentionPolicyItem } from '../../types/index.ts';
 import { apiFetch, fetchProtectedBlobUrl, formatDateTime } from '../../utils/api.ts';
+import { getCloudDbStatus, subscribeCloudDbStatus, type CloudDbStatus } from '../../lib/firestoreSync.ts';
 import { formatBytesCompact } from '../common/MediaPreviewModal.tsx';
 
 interface ManagedAdminRow {
@@ -79,6 +80,7 @@ export default function AuditSessionsView({ onOpenIntegrations }: { onOpenIntegr
   // Tab 2: Backups & Restore
   const [backups, setBackups] = useState<any[]>([]);
   const [driveSyncStatus, setDriveSyncStatus] = useState<GoogleDriveSyncStatusResponse | null>(null);
+  const [cloudDbStatus, setCloudDbStatus] = useState<CloudDbStatus>(() => getCloudDbStatus());
   const [runningBackup, setRunningBackup] = useState(false);
   const [verifyingBackupId, setVerifyingBackupId] = useState<number | null>(null);
   const [downloadingBackupId, setDownloadingBackupId] = useState<number | null>(null);
@@ -242,6 +244,10 @@ export default function AuditSessionsView({ onOpenIntegrations }: { onOpenIntegr
     else if (activeTab === 'permissions') loadPermissions();
     else if (activeTab === 'retention') loadSecurityRetention();
   }, [activeTab, loadSecurityDashboard, loadBackups, loadActivityMonitor, loadPermissions, loadSecurityRetention]);
+
+  useEffect(() => {
+    return subscribeCloudDbStatus((st) => setCloudDbStatus(st));
+  }, []);
 
   useEffect(() => {
     return subscribeRealtime((evt) => {
@@ -1032,7 +1038,39 @@ export default function AuditSessionsView({ onOpenIntegrations }: { onOpenIntegr
             </div>
           </div>
 
-          {/* Linked Google Drive 1-Second Database Location */}
+          {/* Lifetime Cloud Web Database + Linked Google Drive Location */}
+          <div className="bg-emerald-50/50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/60 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
+            <div className="min-w-0 flex-1 space-y-1">
+              <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">
+                <Database className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>Lifetime Cloud Web Database (Firebase Firestore · Always On)</span>
+                <span
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                    cloudDbStatus.connected
+                      ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300'
+                      : 'bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300'
+                  }`}
+                >
+                  {cloudDbStatus.connected
+                    ? `Active All Time · ${cloudDbStatus.totalRecords || cloudDbStatus.cloudTotalRecords || 0} Records`
+                    : 'Sign In Once via Cloud DB & Drive Panel'}
+                </span>
+              </div>
+              <div className="text-xs text-slate-600 dark:text-slate-300">
+                Auto-saves every CRM mutation in real time and automatically recovers after any server restart without 60-minute expiry.
+              </div>
+            </div>
+            {onOpenIntegrations && (
+              <button
+                type="button"
+                onClick={onOpenIntegrations}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer shrink-0"
+              >
+                Open Cloud DB &amp; Drive Panel
+              </button>
+            )}
+          </div>
+
           <div className="bg-blue-50/50 dark:bg-blue-950/20 border border-blue-200 dark:border-blue-900/60 rounded-xl p-4 flex flex-wrap items-center justify-between gap-4">
             <div className="min-w-0 flex-1 space-y-1">
               <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-900 dark:text-white">

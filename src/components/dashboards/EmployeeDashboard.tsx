@@ -19,6 +19,7 @@ export default function EmployeeDashboard({
   const [tickets, setTickets] = useState<TicketItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [errorMsg, setErrorMsg] = useState('');
 
   const shareableLink = `${window.location.origin}/?panel=employee-login`;
 
@@ -27,6 +28,9 @@ export default function EmployeeDashboard({
     try {
       const res = await apiFetch<{ tickets: TicketItem[] }>('/api/tickets');
       setTickets(res.tickets);
+      setErrorMsg('');
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Unable to load your support tickets.');
     } finally {
       setLoading(false);
     }
@@ -74,6 +78,14 @@ export default function EmployeeDashboard({
 
   return (
     <div className="space-y-6">
+      {errorMsg && (
+        <div className="px-4 py-2.5 text-xs rounded-lg border border-red-200 dark:border-red-900 bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 flex items-center justify-between gap-2">
+          <span>{errorMsg}</span>
+          <button type="button" onClick={() => setErrorMsg('')} className="font-semibold hover:underline cursor-pointer">
+            Dismiss
+          </button>
+        </div>
+      )}
       {/* Shareable Employee Login Link at top of panel */}
       <div className="bg-white dark:bg-slate-900 border border-blue-200 dark:border-blue-900/60 rounded-xl px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2 min-w-0 flex-1 text-xs">
