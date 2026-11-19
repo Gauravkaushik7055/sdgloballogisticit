@@ -8,6 +8,7 @@ import jwt from 'jsonwebtoken';
 import { BACKUP_ROOT, db, UPLOAD_ROOT } from '../db.ts';
 import {
   type AuthRequest,
+  getJwtSecret,
   getSessionSecurityPolicy,
   getSuperAdminNotificationPrefs,
   notifyAdmins,
@@ -32,7 +33,6 @@ import { disconnectSession, sendToRoles, sendToSuperAdmins } from '../realtime.t
 import { restoreStoredBackup, runCrmBackup, verifyStoredBackup } from '../backupService.ts';
 
 const router = Router();
-const MFA_CHALLENGE_SECRET = process.env.JWT_SECRET || 'logicore-dev-secret-change-in-production';
 
 function getCookieSecurityFlags(req: any) {
   const forwardedProto = String(req.get?.('x-forwarded-proto') || req.headers?.['x-forwarded-proto'] || '')
@@ -206,7 +206,7 @@ router.post('/login', (req, res) => {
         user_id: user.id,
         portal_mode: portal_mode || 'standard',
       },
-      MFA_CHALLENGE_SECRET,
+      getJwtSecret(),
       { expiresIn: '5m' }
     );
     writeAuditLog({
@@ -249,7 +249,7 @@ router.post('/mfa/verify-login', (req, res) => {
 
   let decoded: any;
   try {
-    decoded = jwt.verify(mfa_challenge_token, MFA_CHALLENGE_SECRET);
+    decoded = jwt.verify(mfa_challenge_token, getJwtSecret());
   } catch {
     return res.status(401).json({ error: 'MFA verification window expired. Please sign in again.' });
   }

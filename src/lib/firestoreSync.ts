@@ -937,6 +937,11 @@ export async function syncCrmToCloudFirestore(options?: {
       }
 
       const nowIso = new Date().toISOString();
+      apiFetch('/api/cloud-db/mark-synced', {
+        method: 'POST',
+        body: JSON.stringify({ lastSeq: snapshot.latestSeq }),
+      }).catch(() => {});
+
       updateStatus({
         connected: true,
         email: firebaseUser.email || null,

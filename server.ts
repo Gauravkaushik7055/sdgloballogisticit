@@ -4,7 +4,7 @@ import http from 'http';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { db, initializeDatabase, syncDepartmentDropdownOptions, syncLocationTypeDropdownOptions } from './server/db.ts';
+import { db, flushAndCloseDatabase, initializeDatabase, syncDepartmentDropdownOptions, syncLocationTypeDropdownOptions } from './server/db.ts';
 import { seedDatabaseIfEmpty } from './server/seed.ts';
 import { attachRealtimeWebSocket } from './server/realtime.ts';
 import authRoutes from './server/routes/authRoutes.ts';
@@ -23,7 +23,7 @@ import { startBackupScheduler } from './server/backupService.ts';
 import { startGoogleDriveSyncLoop } from './server/googleDriveSync.ts';
 
 const SENSITIVE_HTTP_PATH_RE =
-  /^\/(\.env.*|\.git.*|server\/.*|data\/.*|uploads\/.*|backups\/.*|package(?:-lock)?\.json|tsconfig\.json|vite\.config.*|bun\.lockb?)$/i;
+  /^\/(\.env.*|\.git.*|server\/.*|data\/.*|uploads\/.*|backups\/.*|package(?:-lock)?\.json|tsconfig\.json|vite\.config.*|bun\.lockb?|firebase-blueprint\.json|firestore\.rules|DRAFT_firestore\.rules|eslint\.config.*|security_spec\.md)$/i;
 
 async function startServer() {
   initializeDatabase();
@@ -40,6 +40,15 @@ async function startServer() {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+
+    const forwardedProto = String(req.headers['x-forwarded-proto'] || '')
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    if (req.secure || forwardedProto === 'https') {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
 
     const decodedPath = (() => {
       try {
@@ -208,6 +217,25 @@ async function startServer() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`SD Global IT CRM Server listening on http://0.0.0.0:${PORT}`);
   });
+
+  let shuttingDown = false;
+  const gracefulShutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`Received ${signal}; flushing database and closing HTTP server...`);
+    const forceTimer = setTimeout(() => {
+      flushAndCloseDatabase();
+      process.exit(0);
+    }, 5000);
+    forceTimer.unref();
+    server.close(() => {
+      flushAndCloseDatabase();
+      process.exit(0);
+    });
+  };
+
+  process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 startServer();

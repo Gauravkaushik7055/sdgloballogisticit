@@ -9,7 +9,7 @@ import {
 } from './db.ts';
 import { writeAuditLog, type AuthUser } from './auth.ts';
 import { broadcastAll, sendToSuperAdmins } from './realtime.ts';
-import { getDriveConfigRow, isLocalDatabaseFresh } from './googleDriveSync.ts';
+import { getDriveConfigRow, isLocalDatabaseFresh, markLocalDatabaseCloudSynced } from './googleDriveSync.ts';
 import firebaseConfig from '../firebase-applet-config.json' with { type: 'json' };
 
 export const CLOUD_PRIMARY_TABLES = [
@@ -299,6 +299,7 @@ export async function hydrateDatabaseFromCloudSnapshot(
   }
 
   lastNotifiedCloudSeq = getLatestChangelogSeq();
+  markLocalDatabaseCloudSynced('firestore_restore', lastNotifiedCloudSeq);
 
   const validActorRow =
     actor.userId != null

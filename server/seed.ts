@@ -100,4 +100,9 @@ export function seedDatabaseIfEmpty() {
 
   insertSeed();
   syncDepartmentDropdownOptions();
+  try {
+    db.exec('DELETE FROM drive_sync_changelog');
+  } catch {
+    // ignore if table not created yet
+  }
 }

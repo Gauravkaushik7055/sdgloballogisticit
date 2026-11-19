@@ -74,7 +74,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     const host = typeof window !== 'undefined' ? window.location.hostname : 'current domain';
     if (code === 'auth/unauthorized-domain') {
       throw new Error(
-        `Firebase blocked Google Sign-In because "${host}" is not listed under Firebase Console -> Authentication -> Settings -> Authorized domains. Add "${host}" (plus ais-dev-bnfb7caj3qwg2uuy2kbaiw-643335972237.asia-northeast1.run.app and ais-pre-bnfb7caj3qwg2uuy2kbaiw-643335972237.asia-northeast1.run.app) in Firebase Console, then retry.`
+        `Firebase blocked Google Sign-In because "${host}" is not listed under Firebase Console -> Authentication -> Settings -> Authorized domains. Add "sdglobalit.com", "www.sdglobalit.com", "ais-dev-bnfb7caj3qwg2uuy2kbaiw-643335972237.asia-northeast1.run.app", and "ais-pre-bnfb7caj3qwg2uuy2kbaiw-643335972237.asia-northeast1.run.app" in Firebase Console, then retry.`
       );
     }
     if (code === 'auth/popup-blocked') {

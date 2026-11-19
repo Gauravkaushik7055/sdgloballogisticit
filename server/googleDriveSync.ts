@@ -12,9 +12,14 @@ import { writeAuditLog, type AuthUser } from './auth.ts';
 import { broadcastAll, sendToSuperAdmins } from './realtime.ts';
 import { checkAndNotifyCloudDbMutation } from './cloudDbService.ts';
 
+const ENV_DRIVE_URL = process.env.GOOGLE_DRIVE_FOLDER_URL?.trim();
+const ENV_DRIVE_ID = ENV_DRIVE_URL?.match(/\/folders\/([a-zA-Z0-9_-]{10,})/)?.[1] || ENV_DRIVE_URL?.match(/[?&]id=([a-zA-Z0-9_-]{10,})/)?.[1];
+
 export const DEFAULT_DRIVE_FOLDER_URL =
-  'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link';
-export const DEFAULT_DRIVE_FOLDER_ID = '18ub4PwnI3r9io--dCEULoQPW-vPW_ihT';
+  ENV_DRIVE_URL && ENV_DRIVE_ID
+    ? ENV_DRIVE_URL
+    : 'https://drive.google.com/drive/folders/18ub4PwnI3r9io--dCEULoQPW-vPW_ihT?usp=drive_link';
+export const DEFAULT_DRIVE_FOLDER_ID = ENV_DRIVE_ID || '18ub4PwnI3r9io--dCEULoQPW-vPW_ihT';
 
 interface InMemoryDriveSession {
   accessToken: string;
@@ -192,14 +197,103 @@ function safeTableCount(tableName: string): number {
   }
 }
 
+export function markLocalDatabaseCloudSynced(
+  source: 'firestore_sync' | 'firestore_restore' | 'drive_restore',
+  lastSeq?: number
+) {
+  try {
+    const payload = JSON.stringify({
+      syncedWithCloud: true,
+      source,
+      lastSeq: typeof lastSeq === 'number' ? lastSeq : null,
+      updatedAt: new Date().toISOString(),
+    });
+    db.prepare(
+      `INSERT INTO integration_settings (key, value_json, updated_at)
+       VALUES ('cloud_sync_lifecycle', ?, datetime('now'))
+       ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = datetime('now')`
+    ).run(payload);
+  } catch {
+    // ignore if table unavailable during bootstrap
+  }
+}
+
+function isMarkedCloudSynced(): boolean {
+  try {
+    const row = db
+      .prepare("SELECT value_json FROM integration_settings WHERE key = 'cloud_sync_lifecycle'")
+      .get() as { value_json: string } | undefined;
+    if (!row?.value_json) return false;
+    const parsed = JSON.parse(row.value_json);
+    return parsed?.syncedWithCloud === true;
+  } catch {
+    return false;
+  }
+}
+
 export function isLocalDatabaseFresh(): boolean {
+  if (isMarkedCloudSynced()) {
+    return false;
+  }
+  try {
+    const nonAdminUsers = (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c
+           FROM users u
+           JOIN roles r ON u.role_id = r.id
+           WHERE r.name != 'super_admin'`
+        )
+        .get() as { c: number }
+    ).c;
+    if (nonAdminUsers > 0) return false;
+
+    const nonAdminModerators = (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c
+           FROM moderators m
+           JOIN users u ON m.user_id = u.id
+           JOIN roles r ON u.role_id = r.id
+           WHERE r.name != 'super_admin'`
+        )
+        .get() as { c: number }
+    ).c;
+    if (nonAdminModerators > 0) return false;
+
+    const meaningfulMutations = (
+      db
+        .prepare(
+          `SELECT COUNT(*) as c
+           FROM drive_sync_changelog
+           WHERE NOT (table_name = 'users' AND operation = 'UPDATE')
+             AND table_name != 'crm_backups'
+             AND NOT (
+               table_name = 'moderators'
+               AND operation = 'INSERT'
+               AND record_id IN (
+                 SELECT CAST(m.id AS TEXT)
+                 FROM moderators m
+                 JOIN users u ON m.user_id = u.id
+                 JOIN roles r ON u.role_id = r.id
+                 WHERE r.name = 'super_admin'
+               )
+             )`
+        )
+        .get() as { c: number }
+    ).c;
+    if (meaningfulMutations > 0) return false;
+  } catch {
+    // fallback to core table counts below
+  }
+
   return (
     safeTableCount('tickets') === 0 &&
     safeTableCount('employees') === 0 &&
-    safeTableCount('moderators') === 0 &&
     safeTableCount('direct_messages') === 0 &&
     safeTableCount('expenses') === 0 &&
-    safeTableCount('saved_reports') === 0
+    safeTableCount('saved_reports') === 0 &&
+    safeTableCount('broadcast_notifications') === 0
   );
 }
 
@@ -468,6 +562,7 @@ export async function restoreDatabaseFromGoogleDrive(actorUser: AuthUser): Promi
       safeUpdatedBy
     );
 
+    markLocalDatabaseCloudSynced('drive_restore', latestSeqAfter);
     writeAuditLog({
       userId: safeUpdatedBy,
       userEmail: actorUser.email,

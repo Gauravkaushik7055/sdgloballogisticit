@@ -3,9 +3,13 @@ import bcrypt from 'bcryptjs';
 import fs from 'fs';
 import path from 'path';
 
-const dataDir = path.resolve(process.cwd(), 'data');
+const dataDir = process.env.DATA_DIR?.trim()
+  ? path.resolve(process.env.DATA_DIR.trim())
+  : path.resolve(process.cwd(), 'data');
 const backupsDir = path.join(dataDir, 'backups');
-const uploadsDir = path.resolve(process.cwd(), 'uploads');
+const uploadsDir = process.env.UPLOADS_DIR?.trim()
+  ? path.resolve(process.env.UPLOADS_DIR.trim())
+  : path.resolve(process.cwd(), 'uploads');
 
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
@@ -24,6 +28,8 @@ export const DB_PATH = path.join(dataDir, 'it_crm.db');
 function openSqliteDatabase(): Database.Database {
   const conn = new Database(DB_PATH);
   conn.pragma('journal_mode = WAL');
+  conn.pragma('synchronous = NORMAL');
+  conn.pragma('busy_timeout = 5000');
   conn.pragma('foreign_keys = ON');
   return conn;
 }
@@ -36,6 +42,21 @@ export const db: Database.Database = new Proxy({} as Database.Database, {
     return typeof val === 'function' ? val.bind(_db) : val;
   },
 });
+
+export function flushAndCloseDatabase(): void {
+  try {
+    if (_db.open) {
+      try {
+        _db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {
+        // ignore if WAL checkpoint cannot run during shutdown
+      }
+      _db.close();
+    }
+  } catch {
+    // ignore close errors on exit
+  }
+}
 
 export async function restoreDatabaseFromFile(backupFilePath: string): Promise<{ preRestoreFilename: string; preRestorePath: string }> {
   if (!fs.existsSync(backupFilePath)) {

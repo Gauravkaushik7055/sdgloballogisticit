@@ -1,14 +1,17 @@
 import React, { useEffect, useState } from 'react';
-import { CheckCircle2, RotateCcw, X } from 'lucide-react';
+import { CheckCircle2, Cloud, RotateCcw, X } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
 import { DropdownProvider } from './context/DropdownContext.tsx';
 import { ThemeProvider } from './context/ThemeContext.tsx';
 import { GoogleDriveSyncStatusResponse } from './types/index.ts';
 import { apiFetch, formatDateTime } from './utils/api.ts';
-import { getGoogleAccessToken, initFirebaseCloudAuth } from './utils/googleDriveAuth.ts';
+import { getGoogleAccessToken, googleSignIn, initFirebaseCloudAuth } from './utils/googleDriveAuth.ts';
 import {
   checkAndAutoHydrateFromCloudFirestore,
+  getCloudDbStatus,
+  subscribeCloudDbStatus,
   syncCrmToCloudFirestore,
+  type CloudDbStatus,
 } from './lib/firestoreSync.ts';
 import { auth } from './lib/firebase.ts';
 import LoginPage from './components/LoginPage.tsx';
@@ -46,6 +49,10 @@ function WorkspaceApp() {
   const [reportPreset, setReportPreset] = useState<{ key: number; reportType: string } | null>(null);
   const [driveRecoveryPrompt, setDriveRecoveryPrompt] = useState<GoogleDriveSyncStatusResponse['remoteRecoveryAvailable']>(null);
   const [restoringDriveDb, setRestoringDriveDb] = useState(false);
+  const [cloudDbStatus, setCloudDbStatus] = useState<CloudDbStatus>(() => getCloudDbStatus());
+  const [cloudConnectBusy, setCloudConnectBusy] = useState(false);
+  const [cloudConnectError, setCloudConnectError] = useState('');
+  const [cloudPromptDismissed, setCloudPromptDismissed] = useState(false);
 
   const [showLivePage, setShowLivePage] = useState<boolean>(() => {
     const pathname = window.location.pathname.replace(/\/+$/, '');
@@ -67,6 +74,10 @@ function WorkspaceApp() {
       setShowLivePage(false);
     }
   }, [user?.id]);
+
+  useEffect(() => {
+    return subscribeCloudDbStatus((st) => setCloudDbStatus(st));
+  }, []);
 
   // Lifetime Cloud Web Database (Firebase Firestore): Auto-recover on fresh container boot
   useEffect(() => {
@@ -130,7 +141,21 @@ function WorkspaceApp() {
       }
     });
 
+    // Lightweight 5-second safety-net check so missed WebSocket ticks still sync changes to Cloud Firestore
+    const safetyPoll = setInterval(() => {
+      if (!auth.currentUser) return;
+      apiFetch<{ latestSeq: number }>('/api/cloud-db/bootstrap-status')
+        .then((boot) => {
+          const st = getCloudDbStatus();
+          if (!st.syncing && !st.restoring && (boot.latestSeq > st.lastSeq || !st.lastSyncedAt)) {
+            syncCrmToCloudFirestore().catch(() => {});
+          }
+        })
+        .catch(() => {});
+    }, 5000);
+
     return () => {
+      clearInterval(safetyPoll);
       if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
       unsubWs();
     };
@@ -331,6 +356,78 @@ function WorkspaceApp() {
       onOpenNewTicket={handleOpenNewTicket}
       onSelectNotificationTicket={(id) => setSelectedTicketId(id)}
     >
+      {user.role === 'super_admin' && !cloudDbStatus.connected && !cloudPromptDismissed && activeSection !== 'integrations' && (
+        <div className="mb-5 px-4 py-3 rounded-xl border border-amber-200 dark:border-amber-800/80 bg-amber-50 dark:bg-amber-950/40 text-amber-950 dark:text-amber-200 text-xs flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <Cloud className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="space-y-0.5">
+              <p className="font-semibold">
+                Connect your Google account to activate permanent Cloud Firestore &amp; 1-second Google Drive sync
+              </p>
+              <p className="text-[11px] text-amber-800 dark:text-amber-300/90">
+                Sign in once as the authorized owner account so every record is persisted permanently across restarts and synced to Google Drive.
+              </p>
+              {cloudConnectError && (
+                <p className="text-[11px] text-rose-700 dark:text-rose-300 font-medium pt-1">{cloudConnectError}</p>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={cloudConnectBusy}
+              onClick={async () => {
+                setCloudConnectBusy(true);
+                setCloudConnectError('');
+                try {
+                  const { user: gUser, accessToken } = await googleSignIn();
+                  const res = await checkAndAutoHydrateFromCloudFirestore();
+                  if (res.restored) {
+                    bumpRefresh();
+                    refreshUser();
+                    setCreatedBanner(
+                      `Connected ${gUser.email || 'Google Account'} and restored ${res.restoredCount} saved records from Cloud Firestore.`
+                    );
+                  } else {
+                    await syncCrmToCloudFirestore({ force: true });
+                    setCreatedBanner(
+                      `Connected ${gUser.email || 'Google Account'}. Permanent Cloud Firestore sync is now active.`
+                    );
+                  }
+                  await apiFetch('/api/integrations/google-drive/session', {
+                    method: 'POST',
+                    headers: { 'X-Google-Access-Token': accessToken },
+                    body: JSON.stringify({ confirmSync: false }),
+                  }).catch(() => {});
+                } catch (e: any) {
+                  setCloudConnectError(e?.message || 'Google Sign-In failed. Open Integrations to retry.');
+                } finally {
+                  setCloudConnectBusy(false);
+                }
+              }}
+              className="px-3 py-1.5 rounded-lg bg-slate-900 dark:bg-amber-500 text-white dark:text-slate-950 font-semibold hover:opacity-90 disabled:opacity-60 cursor-pointer"
+            >
+              {cloudConnectBusy ? 'Connecting...' : 'Connect Google Cloud DB'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveSection('integrations')}
+              className="px-2.5 py-1.5 rounded-lg border border-amber-300 dark:border-amber-700 font-medium hover:bg-amber-100 dark:hover:bg-amber-900/50 cursor-pointer"
+            >
+              Open Settings
+            </button>
+            <button
+              type="button"
+              onClick={() => setCloudPromptDismissed(true)}
+              aria-label="Dismiss banner"
+              className="p-1 text-amber-700 dark:text-amber-300 hover:opacity-75 cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {createdBanner && (
         <div className="mb-5 px-4 py-3 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-xs flex items-center justify-between">
           <span className="inline-flex items-center gap-2 font-medium">

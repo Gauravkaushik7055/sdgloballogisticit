@@ -1,10 +1,58 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import crypto from 'crypto';
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { db } from './db.ts';
 import { disconnectSession, sendToUser } from './realtime.ts';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'logicore-dev-secret-change-in-production';
+const PLACEHOLDER_JWT_SECRETS = new Set([
+  'change-this-to-a-strong-random-secret',
+  'logicore-dev-secret-change-in-production',
+]);
+
+let ephemeralFallbackSecret: string | null = null;
+
+export function getJwtSecret(): string {
+  const envSecret = process.env.JWT_SECRET?.trim();
+  if (envSecret && envSecret.length >= 16 && !PLACEHOLDER_JWT_SECRETS.has(envSecret)) {
+    return envSecret;
+  }
+
+  try {
+    const existing = db
+      .prepare("SELECT value_json FROM integration_settings WHERE key = 'jwt_signing_secret'")
+      .get() as { value_json: string } | undefined;
+    if (existing?.value_json) {
+      const parsed = JSON.parse(existing.value_json);
+      if (typeof parsed?.secret === 'string' && parsed.secret.length >= 32) {
+        return parsed.secret;
+      }
+    }
+
+    const generated = crypto.randomBytes(32).toString('hex');
+    db.prepare(
+      `INSERT INTO integration_settings (key, value_json, updated_at)
+       VALUES ('jwt_signing_secret', ?, datetime('now'))
+       ON CONFLICT(key) DO NOTHING`
+    ).run(JSON.stringify({ secret: generated }));
+
+    const persisted = db
+      .prepare("SELECT value_json FROM integration_settings WHERE key = 'jwt_signing_secret'")
+      .get() as { value_json: string } | undefined;
+    if (persisted?.value_json) {
+      const parsed = JSON.parse(persisted.value_json);
+      if (typeof parsed?.secret === 'string' && parsed.secret.length >= 32) {
+        return parsed.secret;
+      }
+    }
+    return generated;
+  } catch {
+    if (!ephemeralFallbackSecret) {
+      ephemeralFallbackSecret = crypto.randomBytes(32).toString('hex');
+    }
+    return ephemeralFallbackSecret;
+  }
+}
 
 const auditContextStorage = new AsyncLocalStorage<{ sessionId?: number | null; ip?: string | null }>();
 
@@ -124,11 +172,11 @@ export function sweepExpiredSessions(): number {
 
 export function signToken(payload: AuthUser): string {
   // No fixed JWT expiration so Live Action sessions remain active continuously until manually stopped or terminated.
-  return jwt.sign(payload, JWT_SECRET);
+  return jwt.sign(payload, getJwtSecret());
 }
 
 export function verifyToken(token: string): AuthUser {
-  return jwt.verify(token, JWT_SECRET) as AuthUser;
+  return jwt.verify(token, getJwtSecret()) as AuthUser;
 }
 
 export function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {

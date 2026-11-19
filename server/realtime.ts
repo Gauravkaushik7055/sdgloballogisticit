@@ -1,10 +1,7 @@
 import type { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import jwt from 'jsonwebtoken';
-import type { AuthUser } from './auth.ts';
+import { verifyToken } from './auth.ts';
 import { db } from './db.ts';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'logicore-dev-secret-change-in-production';
 
 interface ConnectedClient {
   ws: WebSocket;
@@ -183,7 +180,7 @@ export function attachRealtimeWebSocket(server: HttpServer) {
         return;
       }
 
-      const decoded = jwt.verify(token, JWT_SECRET) as AuthUser;
+      const decoded = verifyToken(token);
       const dbUser = db
         .prepare('SELECT u.id, u.status, r.name as role FROM users u JOIN roles r ON u.role_id = r.id WHERE u.id = ?')
         .get(decoded.id) as { id: number; status: string; role: string } | undefined;

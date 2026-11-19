@@ -6,7 +6,7 @@ import {
   hydrateDatabaseFromCloudSnapshot,
   verifyFirebaseIdTokenViaIdentityToolkit,
 } from '../cloudDbService.ts';
-import { isLocalDatabaseFresh } from '../googleDriveSync.ts';
+import { isLocalDatabaseFresh, markLocalDatabaseCloudSynced } from '../googleDriveSync.ts';
 
 const CLOUD_OWNER_EMAIL = 'a88593347@gmail.com';
 const router = Router();
@@ -19,6 +19,13 @@ router.get('/cloud-db/bootstrap-status', (_req, res) => {
 // Export full database snapshot for authenticated Super Admin to sync to Cloud Firestore
 router.get('/cloud-db/export', requireAuth, requireRole('super_admin'), (_req, res) => {
   res.json(exportDatabaseSnapshotForCloud());
+});
+
+// Mark local runtime SQLite as synchronized with Cloud Firestore so future edits always push forward
+router.post('/cloud-db/mark-synced', requireAuth, requireRole('super_admin'), (req, res) => {
+  const lastSeq = typeof req.body?.lastSeq === 'number' ? req.body.lastSeq : undefined;
+  markLocalDatabaseCloudSynced('firestore_sync', lastSeq);
+  res.json({ ok: true });
 });
 
 // Manual or authenticated restore from Cloud Firestore into server runtime SQLite
@@ -39,9 +46,6 @@ router.post('/cloud-db/hydrate', requireAuth, requireRole('super_admin'), async 
 // Automatic startup recovery using verified Google Firebase ID token ONLY when local server DB is fresh
 router.post('/cloud-db/auto-hydrate', async (req, res) => {
   try {
-    if (!isLocalDatabaseFresh()) {
-      return res.json({ ok: true, skipped: true, reason: 'database_already_populated' });
-    }
     const idToken = (req.header('X-Firebase-Id-Token') || '').trim();
     if (!idToken) {
       return res.status(401).json({ error: 'X-Firebase-Id-Token header is required.' });
@@ -59,6 +63,9 @@ router.post('/cloud-db/auto-hydrate', async (req, res) => {
       return res.status(403).json({
         error: `Access denied: only the authorized owner account (${CLOUD_OWNER_EMAIL}) may auto-hydrate Cloud Firestore.`,
       });
+    }
+    if (!isLocalDatabaseFresh()) {
+      return res.json({ ok: true, skipped: true, reason: 'database_already_populated' });
     }
     const result = await hydrateDatabaseFromCloudSnapshot(req.body, {
       userId: null,
