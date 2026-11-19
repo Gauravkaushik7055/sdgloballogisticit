@@ -1,13 +1,84 @@
 import { getApp, getApps, initializeApp } from 'firebase/app';
-import { getAuth } from 'firebase/auth';
-import { doc, getDocFromServer, getFirestore } from 'firebase/firestore';
+import {
+  browserLocalPersistence,
+  getAuth,
+  indexedDBLocalPersistence,
+  onIdTokenChanged,
+  setPersistence,
+} from 'firebase/auth';
+import {
+  doc,
+  getDocFromServer,
+  getFirestore,
+  initializeFirestore,
+  persistentLocalCache,
+  persistentMultipleTabManager,
+  type Firestore,
+} from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 export const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-export const db = firebaseConfig.firestoreDatabaseId
-  ? getFirestore(app, firebaseConfig.firestoreDatabaseId)
-  : getFirestore(app);
+
+// Explicitly enforce permanent browser persistence across refreshes and browser restarts
+setPersistence(auth, browserLocalPersistence).catch(() => {
+  setPersistence(auth, indexedDBLocalPersistence).catch(() => {
+    // fallback to SDK default persistence if storage is restricted
+  });
+});
+
+function createPersistentFirestore(): Firestore {
+  const dbId = firebaseConfig.firestoreDatabaseId || undefined;
+  try {
+    return initializeFirestore(
+      app,
+      {
+        localCache: persistentLocalCache({
+          tabManager: persistentMultipleTabManager(),
+        }),
+      },
+      dbId
+    );
+  } catch {
+    return dbId ? getFirestore(app, dbId) : getFirestore(app);
+  }
+}
+
+export const db = createPersistentFirestore();
+
+let tokenKeepaliveStarted = false;
+
+export function startFirebaseTokenKeepalive(): void {
+  if (tokenKeepaliveStarted || typeof window === 'undefined') return;
+  tokenKeepaliveStarted = true;
+
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+  const clearTimer = () => {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  };
+
+  onIdTokenChanged(auth, (fbUser) => {
+    clearTimer();
+    if (!fbUser) return;
+    // Proactively refresh the Firebase Auth ID token every 45 minutes while online
+    // so permanent Cloud Firestore sync and recovery tokens never lapse.
+    refreshTimer = setInterval(() => {
+      if (auth.currentUser && navigator.onLine !== false) {
+        auth.currentUser.getIdToken(true).catch(() => {});
+      }
+    }, 45 * 60 * 1000);
+  });
+
+  window.addEventListener('online', () => {
+    if (auth.currentUser) {
+      auth.currentUser.getIdToken(true).catch(() => {});
+    }
+  });
+}
 
 export enum OperationType {
   CREATE = 'create',

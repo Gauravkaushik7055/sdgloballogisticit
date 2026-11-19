@@ -3,6 +3,7 @@ import {
   doc,
   getDocFromServer,
   getDocs,
+  getDocsFromServer,
   query,
   serverTimestamp,
   setDoc,
@@ -46,6 +47,8 @@ interface CloudExportResponse {
 interface CloudBootstrapStatusResponse {
   isFreshLocal: boolean;
   latestSeq: number;
+  lastSyncedSeq?: number;
+  lastCloudUpdatedAtIso?: string | null;
   driveFolderUrl: string;
   driveFolderId: string;
   projectId: string;
@@ -119,11 +122,49 @@ export function subscribeCloudDbStatus(cb: (status: CloudDbStatus) => void): () 
 const remoteDocCache = new Map<string, { hash: string; createdAt: unknown; ownerUid: string }>();
 let remoteCachePrimedForUid: string | null = null;
 let syncInFlightPromise: Promise<{ synced: boolean; written: number; deleted: number }> | null = null;
+let syncPendingRerun = false;
+let autoRetryTimer: ReturnType<typeof setTimeout> | null = null;
+let consecutiveSyncFailures = 0;
 let hydrateInFlightPromise: Promise<{ restored: boolean; restoredCount: number }> | null = null;
+
+const MASS_DELETE_PROTECTED_COLLECTIONS = new Set([
+  'locations',
+  'departments',
+  'crm_users',
+  'employees',
+  'moderators',
+  'tickets',
+  'assets',
+  'budgets',
+  'expenses',
+  'vendors',
+  'direct_messages',
+  'dropdown_options',
+  'sla_configurations',
+]);
 
 export function resetCloudSyncCache() {
   remoteDocCache.clear();
   remoteCachePrimedForUid = null;
+}
+
+function clearScheduledRetry() {
+  if (autoRetryTimer) {
+    clearTimeout(autoRetryTimer);
+    autoRetryTimer = null;
+  }
+}
+
+function scheduleAutoSyncRetry() {
+  if (typeof window === 'undefined' || autoRetryTimer) return;
+  consecutiveSyncFailures += 1;
+  const delayMs = Math.min(60_000, 5_000 * Math.pow(2, Math.min(consecutiveSyncFailures - 1, 4)));
+  autoRetryTimer = setTimeout(() => {
+    autoRetryTimer = null;
+    if (auth.currentUser && navigator.onLine !== false) {
+      syncCrmToCloudFirestore().catch(() => {});
+    }
+  }, delayMs);
 }
 
 const TRANSIENT_FIRESTORE_CODES = new Set([
@@ -161,7 +202,13 @@ async function withFirestoreRetry<T>(fn: () => Promise<T>, maxRetries = 2): Prom
 
 if (typeof window !== 'undefined') {
   window.addEventListener('online', () => {
+    clearScheduledRetry();
     if (auth.currentUser) {
+      syncCrmToCloudFirestore().catch(() => {});
+    }
+  });
+  document.addEventListener('visibilitychange', () => {
+    if (auth.currentUser && navigator.onLine !== false) {
       syncCrmToCloudFirestore().catch(() => {});
     }
   });
@@ -671,22 +718,28 @@ function buildMappedDocuments(snapshot: CloudExportResponse, uid: string): Mappe
   // 16. auxiliary tables -> crm_records
   const auxTableNames = [
     'roles',
+    'login_sessions',
     'ticket_assignments',
     'ticket_activities',
+    'ticket_attachments',
     'ticket_comments',
     'ticket_time_logs',
     'asset_history',
     'asset_maintenance',
+    'asset_import_batches',
     'expense_approvals',
     'admin_permissions',
     'user_mfa',
     'retention_policies',
     'integration_settings',
     'google_drive_sync_config',
+    'google_drive_file_map',
     'notifications',
     'broadcast_notification_deliveries',
+    'chat_attachments',
     'email_communications',
     'whatsapp_communications',
+    'crm_backups',
     'audit_logs',
   ];
 
@@ -694,7 +747,7 @@ function buildMappedDocuments(snapshot: CloudExportResponse, uid: string): Mappe
     const rows = t[tableName] || [];
     rows.forEach((row, idx) => {
       const rawKey =
-        row.id ?? row.setting_key ?? row.entity_key ?? row.user_id ?? `${idx}`;
+        row.id ?? row.key ?? row.setting_key ?? row.entity_key ?? row.user_id ?? `${idx}`;
       const sourceKey = sanitizeId(rawKey, String(idx));
       const docId = sanitizeId(`${tableName}__${sourceKey}`);
       docs.push({
@@ -719,7 +772,14 @@ async function primeRemoteCache(firebaseUser: User): Promise<void> {
 
   for (const colName of [...COLLECTIONS_TO_HYDRATE, 'crm_meta']) {
     try {
-      const snap = await withFirestoreRetry(() => getDocs(buildCollectionReadQuery(colName, firebaseUser)));
+      const q = buildCollectionReadQuery(colName, firebaseUser);
+      const snap = await withFirestoreRetry(async () => {
+        try {
+          return await getDocsFromServer(q);
+        } catch {
+          return await getDocs(q);
+        }
+      });
       snap.forEach((d) => {
         const data = d.data();
         const path = `${colName}/${d.id}`;
@@ -744,6 +804,8 @@ export async function syncCrmToCloudFirestore(options?: {
     return { synced: false, written: 0, deleted: 0 };
   }
   if (syncInFlightPromise) {
+    // Queue an immediate follow-up sync so rapid edits made during an active push are never dropped
+    syncPendingRerun = true;
     return syncInFlightPromise;
   }
 
@@ -759,16 +821,35 @@ export async function syncCrmToCloudFirestore(options?: {
         databaseId: bootstrap.firestoreDatabaseId,
       });
 
-      // Safety guard: never overwrite an existing Cloud Firestore database with fresh container seed data!
-      if (bootstrap.isFreshLocal) {
-        const meta = await inspectCloudMetaDoc();
-        if (meta.exists && meta.totalRecords > 0) {
-          updateStatus({
-            cloudSnapshotDetected: true,
-            cloudTotalRecords: meta.totalRecords,
-            cloudUpdatedAt: meta.updatedAtIso,
-          });
-          await hydrateServerFromCloudFirestore('auto');
+      // Safety guard 1: never overwrite an existing Cloud Firestore database with fresh container seed data!
+      const meta = await inspectCloudMetaDoc();
+      if (bootstrap.isFreshLocal && meta.exists && meta.totalRecords > 0) {
+        updateStatus({
+          cloudSnapshotDetected: true,
+          cloudTotalRecords: meta.totalRecords,
+          cloudUpdatedAt: meta.updatedAtIso,
+        });
+        await hydrateServerFromCloudFirestore('auto');
+        consecutiveSyncFailures = 0;
+        clearScheduledRetry();
+        return { synced: false, written: 0, deleted: 0 };
+      }
+
+      // Safety guard 2: never overwrite newer Cloud Firestore records with stale local data when local has no new edits
+      if (
+        !options?.force &&
+        meta.exists &&
+        meta.totalRecords > 0 &&
+        meta.updatedAtIso &&
+        bootstrap.lastCloudUpdatedAtIso &&
+        bootstrap.latestSeq <= (bootstrap.lastSyncedSeq ?? 0)
+      ) {
+        const cloudTs = Date.parse(meta.updatedAtIso);
+        const localWatermarkTs = Date.parse(bootstrap.lastCloudUpdatedAtIso);
+        if (Number.isFinite(cloudTs) && Number.isFinite(localWatermarkTs) && cloudTs > localWatermarkTs + 2000) {
+          await hydrateServerFromCloudFirestore('manual');
+          consecutiveSyncFailures = 0;
+          clearScheduledRetry();
           return { synced: false, written: 0, deleted: 0 };
         }
       }
@@ -782,6 +863,7 @@ export async function syncCrmToCloudFirestore(options?: {
       const mappedDocs = buildMappedDocuments(snapshot, firebaseUser.uid);
 
       const activePaths = new Set<string>();
+      const localCountByCol = new Map<string, number>();
       const ops: Array<
         | { type: 'set'; path: string; col: string; id: string; data: Record<string, any> }
         | { type: 'delete'; path: string; col: string; id: string }
@@ -790,6 +872,7 @@ export async function syncCrmToCloudFirestore(options?: {
       for (const item of mappedDocs) {
         const path = `${item.col}/${item.id}`;
         activePaths.add(path);
+        localCountByCol.set(item.col, (localCountByCol.get(item.col) || 0) + 1);
         const nextHash = stableHash(item.data);
         const cached = remoteDocCache.get(path);
 
@@ -821,18 +904,25 @@ export async function syncCrmToCloudFirestore(options?: {
         }
       }
 
-      // Propagate deletions to Cloud Firestore (except rolling audit_logs window)
+      // Propagate deletions to Cloud Firestore with accidental mass-deletion protection
       for (const cachedPath of remoteDocCache.keys()) {
         if (cachedPath.startsWith('crm_meta/')) continue;
         if (cachedPath.startsWith('crm_records/audit_logs__')) continue;
+        if (cachedPath.startsWith('crm_records/crm_backups__')) continue;
         if (!activePaths.has(cachedPath)) {
           const slashIdx = cachedPath.indexOf('/');
           if (slashIdx > 0) {
+            const col = cachedPath.slice(0, slashIdx);
+            const id = cachedPath.slice(slashIdx + 1);
+            // Never allow an unexpected empty local table to mass-delete an entire core Cloud Firestore collection
+            if (!options?.force && MASS_DELETE_PROTECTED_COLLECTIONS.has(col) && (localCountByCol.get(col) || 0) === 0) {
+              continue;
+            }
             ops.push({
               type: 'delete',
               path: cachedPath,
-              col: cachedPath.slice(0, slashIdx),
-              id: cachedPath.slice(slashIdx + 1),
+              col,
+              id,
             });
           }
         }
@@ -936,11 +1026,16 @@ export async function syncCrmToCloudFirestore(options?: {
         );
       }
 
-      const nowIso = new Date().toISOString();
+      const latestMetaAfterWrite = await inspectCloudMetaDoc().catch(() => null);
+      const nowIso = latestMetaAfterWrite?.updatedAtIso || new Date().toISOString();
+
       apiFetch('/api/cloud-db/mark-synced', {
         method: 'POST',
-        body: JSON.stringify({ lastSeq: snapshot.latestSeq }),
+        body: JSON.stringify({ lastSeq: snapshot.latestSeq, cloudUpdatedAtIso: nowIso }),
       }).catch(() => {});
+
+      consecutiveSyncFailures = 0;
+      clearScheduledRetry();
 
       updateStatus({
         connected: true,
@@ -959,10 +1054,17 @@ export async function syncCrmToCloudFirestore(options?: {
     } catch (err: any) {
       const msg = err?.message || 'Cloud Firestore sync failed';
       updateStatus({ lastError: msg });
+      scheduleAutoSyncRetry();
       throw err;
     } finally {
       updateStatus({ syncing: false });
       syncInFlightPromise = null;
+      if (syncPendingRerun) {
+        syncPendingRerun = false;
+        setTimeout(() => {
+          syncCrmToCloudFirestore().catch(() => {});
+        }, 250);
+      }
     }
   })();
 
@@ -971,7 +1073,7 @@ export async function syncCrmToCloudFirestore(options?: {
 
 export async function readAllCloudFirestoreTables(firebaseUser: User): Promise<{
   tables: Record<string, any[]>;
-  meta: { lastSeq: number; totalRecords: number };
+  meta: { lastSeq: number; totalRecords: number; updatedAtIso: string | null };
 }> {
   const tables: Record<string, any[]> = {
     locations: [],
@@ -1165,7 +1267,7 @@ export async function readAllCloudFirestoreTables(firebaseUser: User): Promise<{
 
   return {
     tables,
-    meta: { lastSeq: meta.lastSeq, totalRecords: meta.totalRecords },
+    meta: { lastSeq: meta.lastSeq, totalRecords: meta.totalRecords, updatedAtIso: meta.updatedAtIso },
   };
 }
 

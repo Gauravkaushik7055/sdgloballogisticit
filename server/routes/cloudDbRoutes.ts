@@ -24,7 +24,9 @@ router.get('/cloud-db/export', requireAuth, requireRole('super_admin'), (_req, r
 // Mark local runtime SQLite as synchronized with Cloud Firestore so future edits always push forward
 router.post('/cloud-db/mark-synced', requireAuth, requireRole('super_admin'), (req, res) => {
   const lastSeq = typeof req.body?.lastSeq === 'number' ? req.body.lastSeq : undefined;
-  markLocalDatabaseCloudSynced('firestore_sync', lastSeq);
+  const cloudUpdatedAtIso =
+    typeof req.body?.cloudUpdatedAtIso === 'string' ? req.body.cloudUpdatedAtIso : null;
+  markLocalDatabaseCloudSynced('firestore_sync', lastSeq, cloudUpdatedAtIso);
   res.json({ ok: true });
 });
 

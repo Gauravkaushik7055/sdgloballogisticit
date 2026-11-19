@@ -1,6 +1,31 @@
 import React, { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { NotificationItem, NotificationPrefs, UserBroadcastItem, UserSession } from '../types/index.ts';
 import { apiFetch, getAuthToken, setAuthToken } from '../utils/api.ts';
+import { auth } from '../lib/firebase.ts';
+import { checkAndAutoHydrateFromCloudFirestore } from '../lib/firestoreSync.ts';
+
+const EXPLICIT_LOGOUT_KEY = 'sdglobal_explicit_logout';
+const CLOUD_OWNER_EMAIL = 'a88593347@gmail.com';
+
+function setExplicitLogoutFlag(loggedOut: boolean) {
+  try {
+    if (loggedOut) {
+      localStorage.setItem(EXPLICIT_LOGOUT_KEY, '1');
+    } else {
+      localStorage.removeItem(EXPLICIT_LOGOUT_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function isExplicitlyLoggedOut(): boolean {
+  try {
+    return localStorage.getItem(EXPLICIT_LOGOUT_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 export interface RealtimeEvent {
   event: string;
@@ -235,11 +260,50 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshUser = useCallback(async () => {
     try {
       const data = await apiFetch<{ user: UserSession }>('/api/auth/me');
+      setExplicitLogoutFlag(false);
       sessionActiveRef.current = true;
       setUser(data.user);
       await syncUserSessionData(data.user);
     } catch (err: any) {
       const status = err?.status;
+      if (status === 401 && !isExplicitlyLoggedOut()) {
+        // Before logging the user out on a freshly restarted server container,
+        // wait for persistent Firebase Auth and restore Cloud Firestore + owner session seamlessly.
+        try {
+          await auth.authStateReady();
+          const fbUser = auth.currentUser;
+          if (fbUser && (fbUser.email || '').trim().toLowerCase() === CLOUD_OWNER_EMAIL) {
+            await checkAndAutoHydrateFromCloudFirestore().catch(() => {});
+
+            // 1. Retry existing token/cookie now that users, jwt_signing_secret, and login_sessions are hydrated
+            try {
+              const retried = await apiFetch<{ user: UserSession }>('/api/auth/me');
+              sessionActiveRef.current = true;
+              setUser(retried.user);
+              await syncUserSessionData(retried.user);
+              return;
+            } catch {
+              // 2. Fallback: exchange verified Firebase Auth ID token for a fresh permanent Super Admin session
+              const idToken = await fbUser.getIdToken();
+              const resumed = await apiFetch<{ token: string; user: UserSession }>(
+                '/api/auth/firebase-owner-session',
+                {
+                  method: 'POST',
+                  headers: { 'X-Firebase-Id-Token': idToken },
+                }
+              );
+              setAuthToken(resumed.token);
+              sessionActiveRef.current = true;
+              setUser(resumed.user);
+              await syncUserSessionData(resumed.user);
+              return;
+            }
+          }
+        } catch {
+          // Fall through to standard unauthenticated state if owner recovery fails or MFA is required
+        }
+      }
+
       if (status === 401 || status === 403 || !getAuthToken()) {
         sessionActiveRef.current = false;
         setAuthToken(null);
@@ -417,6 +481,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       return data;
     }
     const okData = data as { token: string; user: UserSession };
+    setExplicitLogoutFlag(false);
     setSessionNotice(null);
     shownPopupIdsRef.current.clear();
     setAuthToken(okData.token);
@@ -429,6 +494,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       method: 'POST',
       body: JSON.stringify({ mfa_challenge_token: mfaChallengeToken, code }),
     });
+    setExplicitLogoutFlag(false);
     setSessionNotice(null);
     shownPopupIdsRef.current.clear();
     setAuthToken(data.token);
@@ -441,6 +507,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       method: 'POST',
       body: JSON.stringify(payload),
     });
+    setExplicitLogoutFlag(false);
     setSessionNotice(null);
     shownPopupIdsRef.current.clear();
     setAuthToken(data.token);
@@ -464,6 +531,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         body: JSON.stringify(payload),
       }
     );
+    setExplicitLogoutFlag(false);
     setSessionNotice(null);
     shownPopupIdsRef.current.clear();
     setAuthToken(data.token);
@@ -473,6 +541,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   };
 
   const logout = async () => {
+    setExplicitLogoutFlag(true);
     try {
       await apiFetch('/api/auth/logout', { method: 'POST' });
     } catch {

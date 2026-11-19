@@ -9,7 +9,12 @@ import {
 } from './db.ts';
 import { writeAuditLog, type AuthUser } from './auth.ts';
 import { broadcastAll, sendToSuperAdmins } from './realtime.ts';
-import { getDriveConfigRow, isLocalDatabaseFresh, markLocalDatabaseCloudSynced } from './googleDriveSync.ts';
+import {
+  getCloudSyncLifecycleState,
+  getDriveConfigRow,
+  isLocalDatabaseFresh,
+  markLocalDatabaseCloudSynced,
+} from './googleDriveSync.ts';
 import firebaseConfig from '../firebase-applet-config.json' with { type: 'json' };
 
 export const CLOUD_PRIMARY_TABLES = [
@@ -32,22 +37,28 @@ export const CLOUD_PRIMARY_TABLES = [
 
 export const CLOUD_AUX_TABLES = [
   'roles',
+  'login_sessions',
   'ticket_assignments',
   'ticket_activities',
+  'ticket_attachments',
   'ticket_comments',
   'ticket_time_logs',
   'asset_history',
   'asset_maintenance',
+  'asset_import_batches',
   'expense_approvals',
   'admin_permissions',
   'user_mfa',
   'retention_policies',
   'integration_settings',
   'google_drive_sync_config',
+  'google_drive_file_map',
   'notifications',
   'broadcast_notification_deliveries',
+  'chat_attachments',
   'email_communications',
   'whatsapp_communications',
+  'crm_backups',
   'audit_logs',
 ] as const;
 
@@ -57,6 +68,21 @@ function queryTableRows(tableName: string, limit?: number): any[] {
   try {
     if (tableName === 'audit_logs' && limit) {
       return db.prepare(`SELECT * FROM audit_logs ORDER BY id DESC LIMIT ?`).all(limit) as any[];
+    }
+    if (tableName === 'login_sessions') {
+      return db
+        .prepare(
+          `SELECT * FROM login_sessions
+           WHERE is_active = 1
+           UNION
+           SELECT * FROM (
+             SELECT * FROM login_sessions ORDER BY id DESC LIMIT 150
+           )`
+        )
+        .all() as any[];
+    }
+    if (tableName === 'crm_backups') {
+      return db.prepare(`SELECT * FROM crm_backups ORDER BY id DESC LIMIT 100`).all() as any[];
     }
     return db.prepare(`SELECT * FROM ${tableName}`).all() as any[];
   } catch {
@@ -169,6 +195,7 @@ export interface HydrateCloudPayload {
   meta?: {
     lastSeq?: number;
     totalRecords?: number;
+    updatedAtIso?: string | null;
   };
 }
 
@@ -212,6 +239,7 @@ export async function hydrateDatabaseFromCloudSnapshot(
     'departments',
     'locations',
     'users',
+    'login_sessions',
     'employees',
     'moderators',
     'sla_configurations',
@@ -220,10 +248,12 @@ export async function hydrateDatabaseFromCloudSnapshot(
     'tickets',
     'ticket_assignments',
     'ticket_activities',
+    'ticket_attachments',
     'ticket_comments',
     'ticket_time_logs',
     'asset_history',
     'asset_maintenance',
+    'asset_import_batches',
     'it_budgets',
     'expenses',
     'expense_approvals',
@@ -231,6 +261,7 @@ export async function hydrateDatabaseFromCloudSnapshot(
     'email_communications',
     'whatsapp_communications',
     'direct_messages',
+    'chat_attachments',
     'dropdown_options',
     'broadcast_notifications',
     'broadcast_notification_deliveries',
@@ -240,6 +271,8 @@ export async function hydrateDatabaseFromCloudSnapshot(
     'retention_policies',
     'integration_settings',
     'google_drive_sync_config',
+    'google_drive_file_map',
+    'crm_backups',
     'audit_logs',
   ];
 
@@ -299,7 +332,7 @@ export async function hydrateDatabaseFromCloudSnapshot(
   }
 
   lastNotifiedCloudSeq = getLatestChangelogSeq();
-  markLocalDatabaseCloudSynced('firestore_restore', lastNotifiedCloudSeq);
+  markLocalDatabaseCloudSynced('firestore_restore', lastNotifiedCloudSeq, payload?.meta?.updatedAtIso ?? null);
 
   const validActorRow =
     actor.userId != null
@@ -320,6 +353,9 @@ export async function hydrateDatabaseFromCloudSnapshot(
     },
   });
 
+  // Sync baseline after hydration audit log so hydration itself doesn't trigger a redundant push
+  lastNotifiedCloudSeq = getLatestChangelogSeq();
+
   broadcastAll('system:restored', {
     source: 'cloud_firestore',
     restored_records: restoredCount,
@@ -330,9 +366,12 @@ export async function hydrateDatabaseFromCloudSnapshot(
 }
 
 export function getCloudBootstrapState() {
+  const lifecycle = getCloudSyncLifecycleState();
   return {
     isFreshLocal: isLocalDatabaseFresh(),
     latestSeq: getLatestChangelogSeq(),
+    lastSyncedSeq: lifecycle.lastSeq ?? 0,
+    lastCloudUpdatedAtIso: lifecycle.cloudUpdatedAtIso ?? null,
     driveFolderUrl: getDriveConfigRow().drive_folder_url,
     driveFolderId: getDriveConfigRow().drive_folder_id,
     projectId: firebaseConfig.projectId,

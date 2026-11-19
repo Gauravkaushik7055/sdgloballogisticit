@@ -31,7 +31,9 @@ import {
 import { dispatchOutlookEmail, dispatchWhatsAppMessage, getEffectiveWhatsAppConfig } from '../integrations.ts';
 import { disconnectSession, sendToRoles, sendToSuperAdmins } from '../realtime.ts';
 import { restoreStoredBackup, runCrmBackup, verifyStoredBackup } from '../backupService.ts';
+import { verifyFirebaseIdTokenViaIdentityToolkit } from '../cloudDbService.ts';
 
+const CLOUD_OWNER_EMAIL = 'a88593347@gmail.com';
 const router = Router();
 
 function getCookieSecurityFlags(req: any) {
@@ -238,6 +240,65 @@ router.post('/login', (req, res) => {
   setAuthSessionCookie(req, res, loginResult.token);
 
   res.json(loginResult);
+});
+
+// POST /api/auth/firebase-owner-session
+// Seamlessly restores the permanent Super Admin session after a fresh container restart using a verified Firebase Auth ID token
+router.post('/firebase-owner-session', async (req, res) => {
+  try {
+    const idToken = (req.header('X-Firebase-Id-Token') || '').trim();
+    if (!idToken) {
+      return res.status(401).json({ error: 'X-Firebase-Id-Token header is required.' });
+    }
+    const verified = await verifyFirebaseIdTokenViaIdentityToolkit(idToken);
+    if (!verified.emailVerified || verified.email.trim().toLowerCase() !== CLOUD_OWNER_EMAIL) {
+      writeAuditLog({
+        userEmail: verified.email,
+        action: 'UNAUTHORIZED_ACCESS_ATTEMPT',
+        entityType: 'firebase_owner_session',
+        entityId: verified.uid,
+        details: { reason: 'Non-owner Firebase account attempted automatic owner session resume' },
+        ipAddress: req.ip,
+      });
+      return res.status(403).json({
+        error: `Access denied: only the authorized owner account (${CLOUD_OWNER_EMAIL}) may resume the Super Admin session.`,
+      });
+    }
+
+    const adminUser = db
+      .prepare(
+        `SELECT u.*, r.name as role_name, r.label as role_label
+         FROM users u
+         JOIN roles r ON u.role_id = r.id
+         WHERE r.name = 'super_admin' AND u.status = 'Active'
+         ORDER BY u.id ASC LIMIT 1`
+      )
+      .get() as any;
+
+    if (!adminUser) {
+      return res.status(404).json({ error: 'Active Super Admin account not found.' });
+    }
+
+    // Never bypass MFA if the Super Admin explicitly enabled MFA
+    const mfaRow = db.prepare('SELECT mfa_enabled FROM user_mfa WHERE user_id = ?').get(adminUser.id) as
+      | { mfa_enabled: number }
+      | undefined;
+    if (mfaRow?.mfa_enabled) {
+      return res.status(403).json({
+        error: 'MFA verification is required to sign in.',
+        code: 'MFA_REQUIRED',
+      });
+    }
+
+    const loginResult = buildFullLoginResponse(adminUser, req, 'FIREBASE_OWNER_SESSION_RESTORED', {
+      firebase_email: verified.email,
+      firebase_uid: verified.uid,
+    });
+    setAuthSessionCookie(req, res, loginResult.token);
+    res.json(loginResult);
+  } catch (err: any) {
+    res.status(401).json({ error: err?.message || 'Unable to verify Firebase session token.' });
+  }
 });
 
 // POST /api/auth/mfa/verify-login

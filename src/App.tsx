@@ -13,7 +13,7 @@ import {
   syncCrmToCloudFirestore,
   type CloudDbStatus,
 } from './lib/firestoreSync.ts';
-import { auth } from './lib/firebase.ts';
+import { auth, startFirebaseTokenKeepalive } from './lib/firebase.ts';
 import LoginPage from './components/LoginPage.tsx';
 import LiveWebPage, { PortalEntryMode } from './components/LiveWebPage.tsx';
 import Layout, { NavSection } from './components/Layout.tsx';
@@ -79,8 +79,9 @@ function WorkspaceApp() {
     return subscribeCloudDbStatus((st) => setCloudDbStatus(st));
   }, []);
 
-  // Lifetime Cloud Web Database (Firebase Firestore): Auto-recover on fresh container boot
+  // Lifetime Cloud Web Database (Firebase Firestore): Persistent token refresh + auto-recover on fresh container boot
   useEffect(() => {
+    startFirebaseTokenKeepalive();
     const unsub = initFirebaseCloudAuth(async () => {
       try {
         const res = await checkAndAutoHydrateFromCloudFirestore();
@@ -92,13 +93,15 @@ function WorkspaceApp() {
           setCreatedBanner(
             `CRM automatically restored from Lifetime Cloud Database (${res.restoredCount} records recovered).`
           );
+        } else if (user?.role === 'super_admin') {
+          syncCrmToCloudFirestore().catch(() => {});
         }
       } catch {
         // Error surfaced cleanly via cloudDbStatus in IntegrationsView
       }
     });
     return () => unsub();
-  }, [refreshNotifications, refreshUser]);
+  }, [refreshNotifications, refreshUser, user?.role]);
 
   // Continuous real-time sync to Cloud Firestore & Google Drive recovery monitoring for Super Admin
   useEffect(() => {

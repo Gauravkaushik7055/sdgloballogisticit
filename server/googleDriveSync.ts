@@ -197,15 +197,47 @@ function safeTableCount(tableName: string): number {
   }
 }
 
+export interface CloudSyncLifecycleState {
+  syncedWithCloud: boolean;
+  source: string | null;
+  lastSeq: number | null;
+  cloudUpdatedAtIso: string | null;
+  updatedAt: string | null;
+}
+
+export function getCloudSyncLifecycleState(): CloudSyncLifecycleState {
+  try {
+    const row = db
+      .prepare("SELECT value_json FROM integration_settings WHERE key = 'cloud_sync_lifecycle'")
+      .get() as { value_json: string } | undefined;
+    if (!row?.value_json) {
+      return { syncedWithCloud: false, source: null, lastSeq: null, cloudUpdatedAtIso: null, updatedAt: null };
+    }
+    const parsed = JSON.parse(row.value_json);
+    return {
+      syncedWithCloud: parsed?.syncedWithCloud === true,
+      source: typeof parsed?.source === 'string' ? parsed.source : null,
+      lastSeq: typeof parsed?.lastSeq === 'number' ? parsed.lastSeq : null,
+      cloudUpdatedAtIso: typeof parsed?.cloudUpdatedAtIso === 'string' ? parsed.cloudUpdatedAtIso : null,
+      updatedAt: typeof parsed?.updatedAt === 'string' ? parsed.updatedAt : null,
+    };
+  } catch {
+    return { syncedWithCloud: false, source: null, lastSeq: null, cloudUpdatedAtIso: null, updatedAt: null };
+  }
+}
+
 export function markLocalDatabaseCloudSynced(
   source: 'firestore_sync' | 'firestore_restore' | 'drive_restore',
-  lastSeq?: number
+  lastSeq?: number,
+  cloudUpdatedAtIso?: string | null
 ) {
   try {
+    const prev = getCloudSyncLifecycleState();
     const payload = JSON.stringify({
       syncedWithCloud: true,
       source,
-      lastSeq: typeof lastSeq === 'number' ? lastSeq : null,
+      lastSeq: typeof lastSeq === 'number' ? lastSeq : prev.lastSeq,
+      cloudUpdatedAtIso: cloudUpdatedAtIso ?? prev.cloudUpdatedAtIso ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     });
     db.prepare(
@@ -219,16 +251,7 @@ export function markLocalDatabaseCloudSynced(
 }
 
 function isMarkedCloudSynced(): boolean {
-  try {
-    const row = db
-      .prepare("SELECT value_json FROM integration_settings WHERE key = 'cloud_sync_lifecycle'")
-      .get() as { value_json: string } | undefined;
-    if (!row?.value_json) return false;
-    const parsed = JSON.parse(row.value_json);
-    return parsed?.syncedWithCloud === true;
-  } catch {
-    return false;
-  }
+  return getCloudSyncLifecycleState().syncedWithCloud;
 }
 
 export function isLocalDatabaseFresh(): boolean {
@@ -1304,6 +1327,12 @@ export async function deleteSyncedDriveFile(driveFileId: string, actorUser: Auth
 
 export function startGoogleDriveSyncLoop() {
   if (syncLoopTimer) return;
+  try {
+    // Capture boot-time changelog sequence immediately so mutations within the first second emit cloud_db:mutated
+    checkAndNotifyCloudDbMutation();
+  } catch {
+    // ignore initialization error
+  }
   syncLoopTimer = setInterval(() => {
     try {
       checkAndNotifyCloudDbMutation();
